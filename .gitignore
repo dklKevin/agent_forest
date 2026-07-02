@@ -1,0 +1,9 @@
+# Built binary
+/agentforest
+
+# Go artifacts
+*.out
+/dist/
+
+# macOS
+.DS_Store
