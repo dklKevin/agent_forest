@@ -34,8 +34,13 @@ go build -o agentforest . && ./agentforest
 ```
 
 One self-contained binary, plain character art, no image protocols.
-The current build opens a demo forest of twelve invented repositories, so the world is alive from the first launch.
-Future builds will add first-run repo connection, persistence, and live updates.
+On first run it opens over a demo forest and walks you through connecting the folders where your repositories live.
+Roots are scanned recursively, skipping hidden folders, `node_modules`, and repositories nested inside another repository.
+Every repository with commits becomes a town, and empty repositories stay quiet until their first commit.
+While the app is open, a new commit in any connected repository revives its town within seconds.
+No daemon runs and nothing is watched when the app is closed; the next launch simply catches up.
+
+`agentforest --demo` opens the demo forest of twelve invented repositories any time.
 
 ## Keys
 
@@ -45,19 +50,44 @@ Future builds will add first-run repo connection, persistence, and live updates.
 - `f` mark a town finished; it freezes as a monument.
 - `d` open the groundskeeper's almanac and preview years of neglect in seconds.
 - In the almanac, `+` / `-` shift by day, `<` / `>` by month, `[` / `]` by year, `1`-`6` jump to stages, and `0` restores real time.
+- `c` connect another root; `x` exclude the focused town; `r` rescan every root.
 - `?` help, `esc` dismisses overlays, `q` quits from the forest.
+
+## Commands
+
+The same forest can be tended from scripts:
+
+```
+agentforest connect <dir>        connect a root and scan it
+agentforest towns                list every visible town
+agentforest refresh              rescan all connected roots
+agentforest exclude <name|path>  hide a town (history kept)
+agentforest include <name|path>  restore a hidden town
+```
+
+Use a full path when duplicate town names collide.
+Output is structured, and command-specific errors include help when there is an obvious next step.
+Every command answers `--help`.
+
+## Where it lives
+
+By default, everything sits in `~/.config/agentforest`; `$XDG_CONFIG_HOME` moves it to `$XDG_CONFIG_HOME/agentforest`, and `$AGENTFOREST_HOME` overrides both.
+The storage is plain files you can read:
+`settings.json` holds your roots, excludes, and finished towns; `events.jsonl` is the append-only history the forest grows from.
+Repositories that vanish from disk keep their towns; ruins never disappear.
 
 ## Snapshots and reference sheets
 
 For scripts and screenshots:
 
 ```
-agentforest --snapshot --plain --width 170 --height 40 --at winterwell
+agentforest --snapshot --demo --plain --width 170 --height 40 --at winterwell
 agentforest --gallery species
 agentforest --gallery decay
 ```
 
-Snapshots accept `--seed n`, `--width n`, `--height n`, `--at name`, `--t sec`, and `--plain`.
+Snapshots accept `--seed n`, `--demo`, `--width n`, `--height n`, `--at name`, `--t sec`, and `--plain`.
+Without `--demo`, snapshots read the persisted forest and do not rescan; run `agentforest refresh` first for fresh data.
 If `--at` is wrong, the error lists valid town names.
 Galleries accept `--width`, `--height`, and `--plain`.
 `--version` prints the binary version.
@@ -71,5 +101,5 @@ Shareable only because it is beautiful.
 ## Status
 
 Pre-v1.
-The demo forest is built from generated data.
-Real git scanning, persistence, and live updates are next.
+Real git scanning, persistence, and live updates are in.
+macOS first (Terminal.app, iTerm2, Ghostty); other platforms may work but are not the target yet.

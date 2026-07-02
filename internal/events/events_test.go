@@ -41,3 +41,14 @@ func TestReduceDerivesRepoState(t *testing.T) {
 		t.Fatalf("tags = %v", a.Tags)
 	}
 }
+
+func TestReducePrefersExplicitName(t *testing.T) {
+	ts := time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC)
+	repos := Reduce([]Event{
+		{Kind: KindRepo, Repo: "/home/x/keep", TS: ts, Path: "/home/x/keep", Name: "keep"},
+		{Kind: KindActivity, Repo: "/home/x/keep", TS: ts, Commits: 1},
+	})
+	if len(repos) != 1 || repos[0].Name != "keep" || repos[0].Path != "/home/x/keep" {
+		t.Fatalf("name/path wrong: %+v", repos[0])
+	}
+}
