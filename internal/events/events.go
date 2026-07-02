@@ -83,6 +83,11 @@ func Reduce(evs []Event) []*RepoState {
 		switch e.Kind {
 		case KindRepo:
 			r.Path = e.Path
+			if e.Name != "" {
+				// Real repos are keyed by path and carry a display name; the
+				// demo keys by name and leaves this empty.
+				r.Name = e.Name
+			}
 			if r.FirstTS.IsZero() || e.TS.Before(r.FirstTS) {
 				r.FirstTS = e.TS
 			}
