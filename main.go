@@ -32,7 +32,7 @@ usage:
   agentforest refresh         rescan all connected roots
   agentforest exclude <name>  hide a town (history kept); include restores it
   agentforest --snapshot      print one frame and exit (for scripts and screenshots)
-  agentforest --gallery x     print a reference sheet: x is "species" or "decay"
+  agentforest --gallery x     print a reference sheet: "species", "decay", or "homestead"
 
 flags:
   --seed n        world seed (default 5)
@@ -43,7 +43,7 @@ flags:
   --at name       center the snapshot on a town
   --t sec         wind phase for the snapshot (default 2.5)
   --plain         no color escapes (shape-only output)
-  --gallery kind  print a reference sheet ("species" or "decay")
+  --gallery kind  print a reference sheet ("species", "decay", or "homestead")
   --version       print version
 
 Every subcommand answers --help.
@@ -86,7 +86,7 @@ func main() {
 	if *gallery != "" {
 		if err := printGallery(*gallery, *width, *height, prof); err != nil {
 			fmt.Println("error: " + err.Error())
-			fmt.Println("help: --gallery species | --gallery decay")
+			fmt.Println("help: --gallery species | decay | homestead")
 			os.Exit(2)
 		}
 		return
@@ -217,6 +217,51 @@ func printGallery(kind string, cw, ch int, prof canvas.Profile) error {
 		p.Draw(sprite.Tree{Seed: 7, Species: model.Oak, X: x, GroundY: gy, H: 68, Lvl: 150})
 		p.DrawSign(sprite.Sign{Seed: 3, X: x, GroundY: gy, Name: "done", Lvl: 135, Acc: 235, Monument: true})
 		c.Text(x/2-4, gy/4+2, "monument", 120, 0)
+	case "homestead":
+		type slot struct {
+			tier  int
+			d     float64
+			fin   bool
+			name  string
+			label string
+		}
+		row := func(slots []slot, rgy int) {
+			step := cw * 2 / len(slots)
+			for i, s := range slots {
+				x := step/2 + i*step
+				// Doors face east here so neighboring sheet slots stay clear;
+				// in the forest each settler picks their own side.
+				seed := uint64(90 + i)
+				for sprite.CabinDoorSide(seed) < 0 {
+					seed++
+				}
+				p.DrawCabin(sprite.Cabin{
+					Seed: seed, X: x, GroundY: rgy, Tier: s.tier,
+					Lvl: 128, Decay: s.d, Finished: s.fin,
+				})
+				signX, signGY, hang, armC := sprite.CabinSignMount(s.tier, seed, x, rgy, len(s.name)+4, s.d)
+				p.DrawSign(sprite.Sign{
+					Seed: uint64(9 + i), X: signX, GroundY: signGY,
+					Name: s.name, Lvl: 135, Acc: 235,
+					Decay: s.d, Monument: s.fin, Hang: hang, ArmC: armC,
+				})
+				c.Text(x/2-len(s.label)/2, rgy/4+2, s.label, 120, 0)
+			}
+		}
+		// Upper row: the three sizes and a kept homestead. Lower row: one
+		// homestead walked into the ground.
+		row([]slot{
+			{0, 0, false, "mossjar", "hut · tended"},
+			{1, 0, false, "foxglove", "cabin · tended"},
+			{2, 0, false, "winterwell", "homestead · tended"},
+			{1, 0, true, "thornbook", "kept · finished"},
+		}, int(float64(ch*4)*0.42))
+		row([]slot{
+			{2, 0.37, false, "winterwell", "overgrown"},
+			{2, 0.62, false, "winterwell", "breaking"},
+			{2, 0.85, false, "winterwell", "skeletal"},
+			{2, 0.965, false, "winterwell", "ruins"},
+		}, int(float64(ch*4)*0.9))
 	default:
 		return fmt.Errorf("unknown gallery %q", kind)
 	}

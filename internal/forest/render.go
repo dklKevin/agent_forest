@@ -62,15 +62,16 @@ func (w *World) Render(c *canvas.Canvas, f Frame) {
 	}
 	w.foreground(c, f, dw, dh)
 
-	// The lantern: a soft warm breath on the most recently tended town.
+	// Hearthlight: a soft warm breath on the most recently tended homestead.
 	if f.Spot != nil {
 		sx := float64(f.Spot.SignX) - f.Cam
 		if sx > -60 && sx < float64(dw)+60 {
 			gy := ground(float64(f.Spot.SignX))
-			h := f.Spot.Town.Stature(f.Now) * vs
-			cy := (float64(gy) - h*0.55) / 4
+			_, wallH, roofRise := sprite.CabinDims(f.Spot.Hearth.Tier)
+			ch := float64((wallH + roofRise) * 4)
+			cy := (float64(gy) - ch*0.75) / 4
 			breath := 0.86 + 0.14*math.Sin(f.T*0.6)
-			c.Warm(int(sx/2), int(cy), 17, 8.5, uint8(105*breath))
+			c.Warm(int(sx/2), int(cy), 16, 7.5, uint8(105*breath))
 		}
 	}
 }
@@ -212,10 +213,24 @@ func (w *World) decayInfluence(wx float64, now time.Time) float64 {
 }
 
 // sitePass draws one town's grove (back rows or front rows), plus the
-// forest's own regrowth once decay is deep.
+// forest's own regrowth once decay is deep. The homestead goes down between
+// the rows: over the back trunks, under the front canopy, in the woods.
 func (w *World) sitePass(p *sprite.P, f Frame, s *Site, dw int, vs float64, ground func(float64) int, backRow bool) {
 	d := s.Town.Decay(f.Now)
 	stature := s.Town.Stature(f.Now)
+	if !backRow {
+		hx := float64(s.Hearth.X) - f.Cam
+		if hx > -90 && hx < float64(dw)+90 {
+			p.DrawCabin(sprite.Cabin{
+				Seed: s.Hearth.Seed, X: int(hx),
+				GroundY: ground(float64(s.Hearth.X)),
+				Tier:    s.Hearth.Tier,
+				Lvl:     128, Decay: d,
+				Finished: s.Town.Finished,
+				Focused:  f.Focus == s,
+			})
+		}
+	}
 	for _, tm := range s.trees {
 		if tm.back != backRow {
 			continue
@@ -252,22 +267,31 @@ func (w *World) sitePass(p *sprite.P, f Frame, s *Site, dw int, vs float64, grou
 	}
 }
 
-// signPass draws the town's plaque, and its planted release stakes.
+// signPass mounts the town's name board against its homestead, and plants
+// the release stakes along the trail east of the dooryard.
 func (w *World) signPass(p *sprite.P, f Frame, s *Site, dw int, vs float64, ground func(float64) int) {
 	sx := float64(s.SignX) - f.Cam
-	if sx < -80 || sx > float64(dw)+80 {
+	if sx < -110 || sx > float64(dw)+110 {
 		return
 	}
 	d := s.Town.Decay(f.Now)
 	gy := ground(float64(s.SignX))
-	p.DrawTags(xnoise.Hash(w.Seed, 0x7A6, uint64(s.SignX)), int(sx), gy, len(s.Town.Tags), 100, d)
+	wallW, _, _ := sprite.CabinDims(s.Hearth.Tier)
+	p.DrawTags(xnoise.Hash(w.Seed, 0x7A6, uint64(s.SignX)), int(sx)+wallW+4, gy, len(s.Town.Tags), 100, d)
+	signX, signGY, hang, armC := sprite.CabinSignMount(
+		s.Hearth.Tier, s.Hearth.Seed, int(sx), gy, len(s.Town.Name)+4, d)
+	if !hang {
+		signGY = ground(f.Cam + float64(signX)) // the post plants on its own ground
+	}
 	p.DrawSign(sprite.Sign{
 		Seed: xnoise.Hash(w.Seed, 0x516, uint64(s.SignX)),
-		X:    int(sx), GroundY: gy,
+		X:    signX, GroundY: signGY,
 		Name: s.Town.Name,
 		Lvl:  135, Acc: 235,
 		Decay:    d,
 		Monument: s.Town.Finished,
+		Hang:     hang,
+		ArmC:     armC,
 		Focused:  f.Focus == s,
 	})
 }

@@ -11,6 +11,12 @@ Every git repository you tend grows as a town in one continuous stretch of wild 
 You roam it left and right the way you would walk through real woods, and it quietly reflects your real coding history.
 Opening it should feel like visiting a place you made.
 
+At the heart of every town stands one hand-hewn cabin, the repo's hearth, nestled in a gap barely wider than its walls.
+The name board hangs off its eave, and the size of the homestead grows with the work done there.
+While a repo is being worked, woodsmoke rises, the cord is stacked under the lean-to, and an axe waits in the chopping block.
+Leave it, and the traces scatter, the roof opens, the walls fall, until only the stone chimney stands.
+The chimney always stands.
+
 ## The rules that make it itself
 
 - **Shape carries meaning, never color.**
@@ -84,6 +90,7 @@ For scripts and screenshots:
 agentforest --snapshot --demo --plain --width 170 --height 40 --at winterwell
 agentforest --gallery species
 agentforest --gallery decay
+agentforest --gallery homestead
 ```
 
 Snapshots accept `--seed n`, `--demo`, `--width n`, `--height n`, `--at name`, `--t sec`, and `--plain`.

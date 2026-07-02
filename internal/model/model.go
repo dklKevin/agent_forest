@@ -210,6 +210,19 @@ func (t *Town) Stature(now time.Time) float64 {
 	return 22 + 74*xnoise.Clamp(g, 0, 1)
 }
 
+// HearthTier maps commit volume to homestead size: a hut, a cabin, or a
+// full homestead. Like everything meaning-bearing, it is shape, not color.
+func (t *Town) HearthTier() int {
+	switch {
+	case t.TotalCommits < 200:
+		return 0
+	case t.TotalCommits < 2500:
+		return 1
+	default:
+		return 2
+	}
+}
+
 // TreeCount maps commit volume to grove size.
 func (t *Town) TreeCount() int {
 	n := 2 + 2.6*math.Log10(float64(t.TotalCommits)+1)

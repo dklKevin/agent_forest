@@ -11,12 +11,14 @@ import (
 type Sign struct {
 	Seed     uint64
 	X        int // center, dots
-	GroundY  int // dots
+	GroundY  int // dots: board bottom line when hung, post base when planted
 	Name     string
 	Lvl      uint8   // frame brightness
 	Acc      uint8   // name warmth
 	Decay    float64 // weathers the plaque
 	Monument bool    // finished towns get the carved frame
+	Hang     bool    // a shingle off the homestead's eave: no post
+	ArmC     int     // cell x of the eave corner the bracket reaches; 0 = none
 	Focused  bool
 }
 
@@ -90,22 +92,37 @@ func (p *P) DrawSign(s Sign) {
 		put(cx+o+i, top, hz, frameLvl, 0, uint64(10+i))
 	}
 	put(cx+o+w-1, top, tr, frameLvl, 0, 2)
+	// The bracket arm ties a hung shingle back to its eave corner. A sagging
+	// board pulls away from it; that gap is the neglect speaking.
+	if s.Hang && s.ArmC != 0 {
+		lo, hi := cx+o+w, s.ArmC-1
+		if s.ArmC < cx {
+			lo, hi = s.ArmC+1, cx+o-1
+		}
+		for i := lo; i <= hi; i++ {
+			put(i, top, hz, frameLvl-8, 0, uint64(70+i-lo))
+		}
+	}
 	// Name row: frame may rot, the name persists.
 	o = rowOff(1)
 	put(cx+o, top+1, vt, frameLvl, 0, 3)
 	p.C.Text(cx+o+2, top+1, s.Name, nameLvl, acc)
 	put(cx+o+w-1, top+1, vt, frameLvl, 0, 4)
-	// Bottom row with post stem.
+	// Bottom row; a planted sign grows its post stem here.
 	o = rowOff(2)
 	put(cx+o, top+2, bl, frameLvl, 0, 5)
 	for i := 1; i < w-1; i++ {
 		g := hz
-		if i == w/2 {
+		if !s.Hang && i == w/2 {
 			g = stem
 		}
 		put(cx+o+i, top+2, g, frameLvl, 0, uint64(30+i))
 	}
 	put(cx+o+w-1, top+2, br, frameLvl, 0, 6)
+	if s.Hang {
+		// The homestead holds the board; its dressing is the cabin's to draw.
+		return
+	}
 	// Post to ground.
 	postG := vt
 	if s.Monument {

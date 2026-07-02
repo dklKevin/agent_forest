@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dklKevin/agentforest/internal/model"
+	"github.com/dklKevin/agentforest/internal/sprite"
 	"github.com/dklKevin/agentforest/internal/xnoise"
 )
 
@@ -49,11 +50,20 @@ type wildItem struct {
 	sp   model.Species
 }
 
+// Hearth is a town's homestead: one hand-hewn cabin in the grove. The name
+// board hangs on it, so it is also the site's focal point.
+type Hearth struct {
+	Seed uint64
+	X    int // center, reference dots
+	Tier int
+}
+
 // Site is a town's place in the world.
 type Site struct {
 	Town   *model.Town
 	X0, X1 int // extent in reference dots
 	SignX  int
+	Hearth Hearth
 	trees  []treeMeta
 }
 
@@ -83,15 +93,31 @@ func Build(seed uint64, towns []*model.Town) *World {
 		}
 		back := n - front
 
+		tier := t.HearthTier()
+		hearthSeed := xnoise.Hash(ts, 0xCAB1)
+		gapW, gapE, gapB := sprite.CabinYardGaps(tier, hearthSeed)
 		perTree := 13.0 + xnoise.Unit(ts, 1)*7
-		extent := int(float64(front)*perTree) + 30
+		extent := int(float64(front)*perTree) + 30 + gapW + gapE
 		site := &Site{Town: t, X0: cursor, X1: cursor + extent}
-		site.SignX = cursor + extent/2
 
+		// The hearth: one cabin, set off the site's center by a settler's
+		// whim, dead center only when the town stands finished. The name
+		// board hangs on it, so it is the focal x too.
+		hx := cursor + extent/2
+		if !t.Finished {
+			lo, hi := cursor+gapW+10, cursor+extent-gapE-10
+			if lo < hi {
+				hx = lo + int(xnoise.Unit(ts, 4)*float64(hi-lo))
+			}
+		}
+		site.Hearth = Hearth{Seed: hearthSeed, X: hx, Tier: tier}
+		site.SignX = hx
+
+		carve := carveSpec{x: hx, west: gapW, east: gapE, back: gapB}
 		if t.Finished {
-			site.trees = plantMonumentGrove(ts, t, cursor, extent, front, back)
+			site.trees = plantMonumentGrove(ts, t, cursor, extent, front, back, carve)
 		} else {
-			site.trees = plantWildGrove(ts, t, cursor, extent, front, back)
+			site.trees = plantWildGrove(ts, t, cursor, extent, front, back, carve)
 		}
 		w.Sites = append(w.Sites, site)
 
@@ -106,9 +132,31 @@ func Build(seed uint64, towns []*model.Town) *World {
 	return w
 }
 
+// carveSpec is the hearth's yard. The settler felled what stood where the
+// cabin, the woodshed, and the chopping block went, and nothing more: trees
+// landing inside are pushed just clear, front rows past the dooryard, back
+// rows past the roofline, so the grove closes overhead instead of opening
+// into a plaza.
+type carveSpec struct{ x, west, east, back int }
+
+func (c carveSpec) apply(ts uint64, x, i int, isBack bool) int {
+	gw, ge := c.west, c.east
+	if isBack {
+		gw, ge = c.back, c.back
+	}
+	if x <= c.x-gw || x >= c.x+ge {
+		return x
+	}
+	pad := int(xnoise.Unit(ts, 0x16, uint64(i), boolKey(isBack)) * 5)
+	if x < c.x {
+		return c.x - gw - pad
+	}
+	return c.x + ge + pad
+}
+
 // plantWildGrove scatters a town's trees with jittered spacing and varied
 // heights: a real grove, denser and taller near its heart.
-func plantWildGrove(ts uint64, t *model.Town, x0, extent, front, back int) []treeMeta {
+func plantWildGrove(ts uint64, t *model.Town, x0, extent, front, back int, carve carveSpec) []treeMeta {
 	var trees []treeMeta
 	place := func(i, n int, isBack bool) {
 		fi := 0.0
@@ -117,6 +165,7 @@ func plantWildGrove(ts uint64, t *model.Town, x0, extent, front, back int) []tre
 		}
 		x := x0 + 15 + int((fi*0.5+0.5)*float64(extent-30))
 		x += int(xnoise.Range(ts, -7, 7, 0x11, uint64(i), boolKey(isBack)))
+		x = carve.apply(ts, x, i, isBack)
 		center := 1 - 0.35*fi*fi // taller near the middle
 		mul := center * xnoise.Range(ts, 0.68, 1.04, 0x12, uint64(i), boolKey(isBack))
 		if isBack {
@@ -138,7 +187,7 @@ func plantWildGrove(ts uint64, t *model.Town, x0, extent, front, back int) []tre
 
 // plantMonumentGrove is the one place order is allowed: a finished town's
 // trees stand in calm symmetry, tallest at the center. Human intent, held.
-func plantMonumentGrove(ts uint64, t *model.Town, x0, extent, front, back int) []treeMeta {
+func plantMonumentGrove(ts uint64, t *model.Town, x0, extent, front, back int, carve carveSpec) []treeMeta {
 	var trees []treeMeta
 	place := func(i, n int, isBack bool) {
 		fi := 0.0
@@ -146,6 +195,7 @@ func plantMonumentGrove(ts uint64, t *model.Town, x0, extent, front, back int) [
 			fi = float64(i)/float64(n-1)*2 - 1
 		}
 		x := x0 + 15 + int((fi*0.5+0.5)*float64(extent-30))
+		x = carve.apply(ts, x, i, isBack)
 		mul := 1 - 0.42*fi*fi // clean symmetric fall-off
 		if isBack {
 			mul *= 0.72
