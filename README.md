@@ -35,7 +35,8 @@ go build -o agentforest . && ./agentforest
 
 One self-contained binary, plain character art, no image protocols.
 On first run it opens over a demo forest and walks you through connecting the folders where your repositories live.
-Roots are scanned recursively; every git repository found becomes a town, and then the forest is yours.
+Roots are scanned recursively, skipping hidden folders, `node_modules`, and repositories nested inside another repository.
+Every repository with commits becomes a town, and empty repositories stay quiet until their first commit.
 While the app is open, a new commit in any connected repository revives its town within seconds.
 No daemon runs and nothing is watched when the app is closed; the next launch simply catches up.
 
@@ -57,18 +58,21 @@ No daemon runs and nothing is watched when the app is closed; the next launch si
 The same forest can be tended from scripts:
 
 ```
-agentforest connect <dir>    connect a root and scan it
-agentforest towns            list every town
-agentforest refresh          rescan all connected roots
-agentforest exclude <name>   hide a town (history kept)
-agentforest include <name>   restore a hidden town
+agentforest connect <dir>        connect a root and scan it
+agentforest towns                list every visible town
+agentforest refresh              rescan all connected roots
+agentforest exclude <name|path>  hide a town (history kept)
+agentforest include <name|path>  restore a hidden town
 ```
 
-Output is structured, errors carry a help line, and every command answers `--help`.
+Use a full path when duplicate town names collide.
+Output is structured, and command-specific errors include help when there is an obvious next step.
+Every command answers `--help`.
 
 ## Where it lives
 
-Everything sits in `~/.config/agentforest` (or `$AGENTFOREST_HOME`) as plain files you can read:
+By default, everything sits in `~/.config/agentforest`; `$XDG_CONFIG_HOME` moves it to `$XDG_CONFIG_HOME/agentforest`, and `$AGENTFOREST_HOME` overrides both.
+The storage is plain files you can read:
 `settings.json` holds your roots, excludes, and finished towns; `events.jsonl` is the append-only history the forest grows from.
 Repositories that vanish from disk keep their towns; ruins never disappear.
 
@@ -77,12 +81,13 @@ Repositories that vanish from disk keep their towns; ruins never disappear.
 For scripts and screenshots:
 
 ```
-agentforest --snapshot --plain --width 170 --height 40 --at winterwell
+agentforest --snapshot --demo --plain --width 170 --height 40 --at winterwell
 agentforest --gallery species
 agentforest --gallery decay
 ```
 
-Snapshots accept `--seed n`, `--width n`, `--height n`, `--at name`, `--t sec`, and `--plain`.
+Snapshots accept `--seed n`, `--demo`, `--width n`, `--height n`, `--at name`, `--t sec`, and `--plain`.
+Without `--demo`, snapshots read the persisted forest and do not rescan; run `agentforest refresh` first for fresh data.
 If `--at` is wrong, the error lists valid town names.
 Galleries accept `--width`, `--height`, and `--plain`.
 `--version` prints the binary version.

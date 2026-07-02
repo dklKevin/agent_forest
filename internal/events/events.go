@@ -1,7 +1,7 @@
 // Package events defines the append-only event stream that feeds the world.
 //
 // This is the seam between data sources and everything else: the demo
-// generator emits the same shape of events that the git adapter will emit, the
+// generator emits the same shape of events that the git adapter emits, the
 // reducer folds events into derived repo state, and the renderer only ever
 // sees the derived state. Events are shaped for replay (a future time-machine
 // walks the same log with an earlier cutoff), and carry JSON tags so the app

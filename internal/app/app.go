@@ -23,7 +23,7 @@ type App struct {
 	Settings    *store.Settings
 	HasSettings bool // settings.json existed; false means first run
 	Events      []events.Event
-	Skipped     int // unreadable event-log lines, reported not hidden
+	Skipped     int // unreadable event-log lines skipped while loading
 }
 
 // Load reads settings and the event log from the storage directory.
@@ -111,7 +111,7 @@ func joinOr(list []string, empty string) string {
 
 // ScanReport summarizes one reconcile pass.
 type ScanReport struct {
-	Repos     int      // repositories discovered under connected roots
+	Repos     int      // repositories scanned after excludes are applied
 	Changed   int      // repositories that produced new events
 	NewEvents int      // events appended to the log
 	Errors    []string // per-repo scan failures, "path: reason"
@@ -136,9 +136,10 @@ func (a *App) ConnectRoot(root string, now time.Time) (ScanReport, error) {
 	return a.Reconcile(now)
 }
 
-// Reconcile discovers repositories under every connected root, scans the
-// ones the log is behind on, and appends the missing events. It works from
-// what the log already knows, so it is safe to run any number of times.
+// Reconcile discovers repositories under every connected root, skips excluded
+// repos, scans the ones the log is behind on, and appends the missing events.
+// It works from what the log already knows, so it is safe to run any number
+// of times.
 func (a *App) Reconcile(now time.Time) (ScanReport, error) {
 	repos := gitscan.Discover(a.Settings.Roots)
 	kept := repos[:0]
