@@ -15,8 +15,9 @@ import (
 	"github.com/dklKevin/agentforest/internal/demo"
 	"github.com/dklKevin/agentforest/internal/events"
 	"github.com/dklKevin/agentforest/internal/forest"
+	"github.com/dklKevin/agentforest/internal/gallery"
 	"github.com/dklKevin/agentforest/internal/model"
-	"github.com/dklKevin/agentforest/internal/sprite"
+	"github.com/dklKevin/agentforest/internal/render"
 	"github.com/dklKevin/agentforest/internal/ui"
 )
 
@@ -68,8 +69,12 @@ func main() {
 		at       = fs.String("at", "", "center snapshot on town")
 		tphase   = fs.Float64("t", 2.5, "snapshot wind phase seconds")
 		plain    = fs.Bool("plain", false, "no color escapes")
-		gallery  = fs.String("gallery", "", "reference sheet: species | decay | homestead | settlement")
+		sheet    = fs.String("gallery", "", "reference sheet: species | decay | homestead | settlement")
 		ver      = fs.Bool("version", false, "print version")
+		// --now pins the reference instant (unix seconds) for the snapshot and
+		// demo clock; 0 means the wall clock. Hidden from usage(): it exists so
+		// goldens and screenshots own the clock, not for everyday use.
+		nowUnix = fs.Int64("now", 0, "reference instant in unix seconds (0 = wall clock)")
 	)
 	fs.Parse(args)
 
@@ -83,12 +88,14 @@ func main() {
 		prof = canvas.NoColor
 	}
 
-	if *gallery != "" {
-		if err := printGallery(*gallery, *width, *height, prof); err != nil {
+	if *sheet != "" {
+		out, err := gallery.RenderGallery(*sheet, *width, *height, prof)
+		if err != nil {
 			fmt.Println("error: " + err.Error())
 			fmt.Println("help: --gallery species | decay | homestead | settlement")
 			os.Exit(2)
 		}
+		fmt.Println(out)
 		return
 	}
 
@@ -100,7 +107,12 @@ func main() {
 
 	// The world comes from the persisted event log once anything is
 	// connected; otherwise from the demo generator, through the same reducer.
+	// One reference instant is read here and threaded into both the demo clock
+	// and the snapshot, so a frame never straddles two wall-clock reads.
 	now := time.Now()
+	if *nowUnix != 0 {
+		now = time.Unix(*nowUnix, 0).UTC()
+	}
 	demoMode := *demoFlag || !a.Connected()
 	var towns []*model.Town
 	if demoMode {
@@ -115,7 +127,7 @@ func main() {
 	world := forest.Build(*seed, towns)
 
 	if *snapshot {
-		printSnapshot(world, *width, *height, *at, *tphase, prof)
+		printSnapshot(world, *width, *height, *at, *tphase, now, prof)
 		return
 	}
 
@@ -133,169 +145,24 @@ func main() {
 	}
 }
 
-func printSnapshot(w *forest.World, cw, ch int, at string, t float64, prof canvas.Profile) {
-	c := canvas.New(cw, ch, prof)
-	now := time.Now()
-	cam := 0.0
-	var focus *forest.Site
-	if at != "" {
-		for _, s := range w.Sites {
-			if s.Town.Name == at {
-				cam = float64(s.SignX) - float64(cw)
-				focus = s
+func printSnapshot(w *forest.World, cw, ch int, at string, t float64, now time.Time, prof canvas.Profile) {
+	out, err := render.RenderSnapshot(w, render.SnapshotOpts{
+		Width: cw, Height: ch, At: at, T: t, Now: now, Profile: prof,
+	})
+	if err != nil {
+		fmt.Println("error: " + err.Error())
+		names := ""
+		for i, s := range w.Sites {
+			if i > 0 {
+				names += ", "
 			}
+			names += s.Town.Name
 		}
-		if focus == nil {
-			fmt.Println("error: no town named " + at)
-			names := ""
-			for i, s := range w.Sites {
-				if i > 0 {
-					names += ", "
-				}
-				names += s.Town.Name
-			}
-			if names == "" {
-				names = "(none yet; run `agentforest connect <dir>`)"
-			}
-			fmt.Println("help: towns are " + names)
-			os.Exit(2)
+		if names == "" {
+			names = "(none yet; run `agentforest connect <dir>`)"
 		}
-	} else if s := w.SpotSite(now); s != nil {
-		cam = float64(s.SignX) - float64(cw)
-		focus = s
+		fmt.Println("help: towns are " + names)
+		os.Exit(2)
 	}
-	if cam < 0 {
-		cam = 0
-	}
-	w.Render(c, forest.Frame{Cam: cam, T: t, Now: now, Focus: focus, Spot: w.SpotSite(now)})
-	fmt.Println(c.Render())
-}
-
-// printGallery renders reference sheets: every species side by side, or one
-// species walked through every decay stage plus a finished monument reference.
-// These exist so silhouettes and stages can be judged at a glance.
-func printGallery(kind string, cw, ch int, prof canvas.Profile) error {
-	c := canvas.New(cw, ch, prof)
-	p := &sprite.P{C: c, T: 2.5}
-	gy := int(float64(ch*4) * 0.78)
-
-	switch kind {
-	case "species":
-		specs := []struct {
-			sp   model.Species
-			lang string
-			h    int
-		}{
-			{model.Oak, "go", 58}, {model.Spruce, "rust", 84}, {model.Willow, "python", 64},
-			{model.Poplar, "typescript", 78}, {model.Flattop, "c", 58}, {model.Scrub, "shell", 20},
-			{model.Birch, "swift", 72}, {model.Grove, "other", 60},
-		}
-		step := cw * 2 / len(specs)
-		for i, s := range specs {
-			x := step/2 + i*step
-			p.Draw(sprite.Tree{Seed: uint64(40 + i), Species: s.sp, X: x, GroundY: gy, H: s.h, Lvl: 150})
-			label := s.sp.String() + " · " + s.lang
-			c.Text(x/2-len(label)/2, gy/4+2, label, 120, 0)
-		}
-	case "decay":
-		depths := []struct {
-			d     float64
-			label string
-		}{
-			{0, "tended"}, {0.15, "first quiet"}, {0.37, "overgrown"},
-			{0.62, "breaking"}, {0.85, "skeletal"}, {0.965, "ruins"},
-		}
-		step := cw * 2 / (len(depths) + 1)
-		for i, s := range depths {
-			x := step/2 + i*step
-			p.Draw(sprite.Tree{Seed: 7, Species: model.Oak, X: x, GroundY: gy, H: 68, Lvl: 150, Decay: s.d})
-			p.Draw(sprite.Tree{Seed: 21, Species: model.Oak, X: x + 18, GroundY: gy, H: 52, Lvl: 130, Decay: s.d})
-			c.Text(x/2-len(s.label)/2, gy/4+2, s.label, 120, 0)
-		}
-		// The seventh slot: what finished looks like instead.
-		x := step/2 + len(depths)*step
-		p.Draw(sprite.Tree{Seed: 7, Species: model.Oak, X: x, GroundY: gy, H: 68, Lvl: 150})
-		p.DrawSign(sprite.Sign{Seed: 3, X: x, GroundY: gy, Name: "done", Lvl: 135, Acc: 235, Monument: true})
-		c.Text(x/2-4, gy/4+2, "monument", 120, 0)
-	case "homestead":
-		type slot struct {
-			tier  int
-			d     float64
-			fin   bool
-			name  string
-			label string
-		}
-		row := func(slots []slot, rgy int) {
-			step := cw * 2 / len(slots)
-			for i, s := range slots {
-				x := step/2 + i*step
-				// Doors face east here so neighboring sheet slots stay clear;
-				// in the forest each settler picks their own side.
-				seed := uint64(90 + i)
-				for sprite.CabinDoorSide(seed) < 0 {
-					seed++
-				}
-				p.DrawCabin(sprite.Cabin{
-					Seed: seed, X: x, GroundY: rgy, Tier: s.tier,
-					Lvl: 128, Decay: s.d, Finished: s.fin,
-				})
-				signX, signGY, hang, armC := sprite.CabinSignMount(s.tier, seed, x, rgy, len(s.name)+4, s.d)
-				p.DrawSign(sprite.Sign{
-					Seed: uint64(9 + i), X: signX, GroundY: signGY,
-					Name: s.name, Lvl: 135, Acc: 235,
-					Decay: s.d, Monument: s.fin, Hang: hang, ArmC: armC,
-				})
-				c.Text(x/2-len(s.label)/2, rgy/4+2, s.label, 120, 0)
-			}
-		}
-		// Upper row: the three sizes and a kept homestead. Lower row: one
-		// homestead walked into the ground.
-		row([]slot{
-			{0, 0, false, "mossjar", "hut · tended"},
-			{1, 0, false, "foxglove", "cabin · tended"},
-			{2, 0, false, "winterwell", "homestead · tended"},
-			{1, 0, true, "thornbook", "kept · finished"},
-		}, int(float64(ch*4)*0.42))
-		row([]slot{
-			{2, 0.37, false, "winterwell", "overgrown"},
-			{2, 0.62, false, "winterwell", "breaking"},
-			{2, 0.85, false, "winterwell", "skeletal"},
-			{2, 0.965, false, "winterwell", "ruins"},
-		}, int(float64(ch*4)*0.9))
-	case "settlement":
-		forms := []struct {
-			f     model.BuildingForm
-			share float64
-			label string
-		}{
-			{model.FormBarn, 1.0, "barn"},
-			{model.FormHomeplace, 0.8, "cabin"},
-			{model.FormWorkshop, 0.3, "workshop"},
-			{model.FormShed, 0.1, "shed"},
-			{model.FormCrib, 0.08, "crib"},
-			{model.FormWatchtower, 0.2, "watchtower"},
-			{model.FormSchoolhouse, 0.15, "schoolhouse"},
-		}
-		row := func(d float64, rgy int, caption string) {
-			step := cw * 2 / (len(forms) + 1)
-			for i, s := range forms {
-				x := step/2 + i*step
-				p.DrawBuilding(sprite.Building{
-					Seed: uint64(70 + i), X: x, GroundY: rgy,
-					Form: s.f, Share: s.share, Lvl: 126, Decay: d,
-				})
-				c.Text(x/2-len(s.label)/2, rgy/4+2, s.label, 120, 0)
-			}
-			x := step/2 + len(forms)*step
-			p.DrawWell(uint64(88), x, rgy, 122, d)
-			c.Text(x/2-2, rgy/4+2, "well", 120, 0)
-			c.Text(2, rgy/4+2, caption, 100, 0)
-		}
-		row(0, int(float64(ch*4)*0.42), "tended")
-		row(0.93, int(float64(ch*4)*0.9), "what remains")
-	default:
-		return fmt.Errorf("unknown gallery %q", kind)
-	}
-	fmt.Println(c.Render())
-	return nil
+	fmt.Println(out)
 }
