@@ -498,7 +498,7 @@ func (w *World) SpotSite(now time.Time) *Site {
 	var bt time.Time
 	for _, s := range w.Sites {
 		if s.Town.IdleOverride != nil {
-			continue // a town under the almanac's hand is not "just tended"
+			continue // a town under the neglect preview is not "just tended"
 		}
 		if s.Town.LastTS.After(bt) {
 			bt, best = s.Town.LastTS, s

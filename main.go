@@ -30,6 +30,7 @@ usage:
   agentforest                 open the forest (first run walks you through connecting repos)
   agentforest connect <dir>   connect a root directory and scan it for repositories
   agentforest towns           list every town
+  agentforest almanac <name|path>  read a town's memoir: its life, folded from its history
   agentforest refresh         rescan all connected roots
   agentforest exclude <name>  hide a town (history kept); include restores it
   agentforest finish <name> ["word"]   lay a town to rest as a monument; unfinish reverses it
@@ -116,11 +117,12 @@ func main() {
 	}
 	demoMode := *demoFlag || !a.Connected()
 	var towns []*model.Town
+	var demoEvents []events.Event
 	if demoMode {
-		repos := events.Reduce(demo.Events(*seed, now))
-		finished := demo.FinishedNames()
+		demoEvents = demo.Events(*seed, now)
+		repos := events.Reduce(demoEvents)
 		for _, r := range repos {
-			towns = append(towns, model.NewTown(r, finished[r.Name]))
+			towns = append(towns, model.NewTown(r, r.Finished))
 		}
 	} else {
 		towns = a.Towns()
@@ -138,6 +140,7 @@ func main() {
 		Seed:    *seed,
 		Demo:    demoMode,
 		Onboard: !*demoFlag && !a.Connected(),
+		Events:  demoEvents,
 	})
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {

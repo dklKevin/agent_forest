@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dklKevin/agentforest/internal/almanac"
 	"github.com/dklKevin/agentforest/internal/app"
 	"github.com/dklKevin/agentforest/internal/events"
 	"github.com/dklKevin/agentforest/internal/model"
@@ -24,6 +25,8 @@ func runCommand(cmd string, args []string) int {
 		return cmdConnect(args)
 	case "towns":
 		return cmdTowns()
+	case "almanac":
+		return cmdAlmanac(args)
 	case "refresh":
 		return cmdRefresh()
 	case "exclude":
@@ -39,7 +42,7 @@ func runCommand(cmd string, args []string) int {
 		return 0
 	default:
 		fmt.Printf("error: unknown command %q\n", cmd)
-		fmt.Println("help: commands are connect, towns, refresh, exclude, include, finish, unfinish")
+		fmt.Println("help: commands are connect, towns, almanac, refresh, exclude, include, finish, unfinish")
 		return 2
 	}
 }
@@ -69,6 +72,21 @@ Fields: name, stage (tended..ruins or monument), commits, last activity.
 
 examples:
   agentforest towns
+`)
+	case "almanac":
+		fmt.Print(`almanac: read a town's memoir, folded from its history
+
+usage:
+  agentforest almanac <name|path>
+
+A handful of lines telling the town's life: planted, grown into a
+settlement, releases staked, long quiets and wakings - and, for a finished
+town, the carved words it was laid to rest with. The same page opens in the
+forest by pressing a while inspecting a town.
+
+examples:
+  agentforest almanac sidecar
+  agentforest almanac ~/code/sidecar
 `)
 	case "refresh":
 		fmt.Print(`refresh: rescan every connected root and append new history to the log
@@ -182,6 +200,50 @@ func cmdTowns() int {
 	fmt.Println("help[2]:")
 	fmt.Println("  Run `agentforest` to walk the forest")
 	fmt.Println("  Run `agentforest exclude <name>` to hide a town")
+	return 0
+}
+
+// cmdAlmanac prints a town's memoir: its life folded from the event log into
+// a few place-flavored lines. For a finished town the carved words lead.
+func cmdAlmanac(args []string) int {
+	if len(args) != 1 {
+		fmt.Println("error: almanac needs exactly one town name or path")
+		fmt.Println("help: agentforest almanac <name|path>")
+		return 2
+	}
+	a, err := app.Load()
+	if err != nil {
+		return internalError(err)
+	}
+	key, err := a.FindTown(args[0])
+	if err != nil {
+		fmt.Println("error: " + err.Error())
+		fmt.Println("help: Run `agentforest towns` to see every town")
+		return 1
+	}
+	m := almanac.Fold(a.Events, key, time.Now())
+	if m == nil {
+		// FindTown resolves against the same log, so this cannot happen; if
+		// it somehow does, fail with a next step rather than a blank page.
+		fmt.Println("error: the log holds no story for " + key)
+		fmt.Println("help: Run `agentforest refresh` to bring the log up to date")
+		return 1
+	}
+	lines := make([]string, 0, len(m.Chapters)+2)
+	if m.Epitaph != "" {
+		lines = append(lines, fmt.Sprintf("%q", m.Epitaph))
+	}
+	if m.Brief != "" {
+		lines = append(lines, m.Brief)
+	}
+	lines = append(lines, m.Chapters...)
+	fmt.Printf("almanac[%d]: %s\n", len(lines), m.Name)
+	for _, l := range lines {
+		fmt.Println("  " + l)
+	}
+	fmt.Println("help[2]:")
+	fmt.Println("  Run `agentforest` to walk the forest")
+	fmt.Println("  Run `agentforest towns` to list every town")
 	return 0
 }
 
