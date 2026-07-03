@@ -5,6 +5,7 @@
 package forest
 
 import (
+	"sort"
 	"time"
 
 	"github.com/dklKevin/agentforest/internal/model"
@@ -58,13 +59,35 @@ type Hearth struct {
 	Tier int
 }
 
+// BuildingSite is one component's structure placed in the settlement.
+type BuildingSite struct {
+	B    model.Building
+	X    int  // center, reference dots
+	Mid  bool // set between the tree rows, half-hidden
+	Seed uint64
+}
+
+// Fence is a fragment of split-rail between two neighboring yards.
+// A and B index Site.Buildings; -1 is the hearth.
+type Fence struct {
+	X0, X1 int
+	A, B   int
+	Seed   uint64
+}
+
 // Site is a town's place in the world.
 type Site struct {
-	Town   *model.Town
-	X0, X1 int // extent in reference dots
-	SignX  int
-	Hearth Hearth
-	trees  []treeMeta
+	Town      *model.Town
+	X0, X1    int // extent in reference dots
+	SignX     int
+	Hearth    Hearth
+	Buildings []BuildingSite
+	Fences    []Fence
+	WellX     int // communal well; 0 means none
+	StakesX   int // release stakes: where the trail leaves the settlement
+	BeltW     int // settlement belt edges: understory grows inside,
+	BeltE     int // old growth stays outside and behind
+	trees     []treeMeta
 }
 
 // Center is the site's focal x in reference dots.
@@ -92,32 +115,15 @@ func Build(seed uint64, towns []*model.Town) *World {
 			front = 1
 		}
 		back := n - front
-
-		tier := t.HearthTier()
-		hearthSeed := xnoise.Hash(ts, 0xCAB1)
-		gapW, gapE, gapB := sprite.CabinYardGaps(tier, hearthSeed)
 		perTree := 13.0 + xnoise.Unit(ts, 1)*7
-		extent := int(float64(front)*perTree) + 30 + gapW + gapE
-		site := &Site{Town: t, X0: cursor, X1: cursor + extent}
 
-		// The hearth: one cabin, set off the site's center by a settler's
-		// whim, dead center only when the town stands finished. The name
-		// board hangs on it, so it is the focal x too.
-		hx := cursor + extent/2
-		if !t.Finished {
-			lo, hi := cursor+gapW+10, cursor+extent-gapE-10
-			if lo < hi {
-				hx = lo + int(xnoise.Unit(ts, 4)*float64(hi-lo))
-			}
-		}
-		site.Hearth = Hearth{Seed: hearthSeed, X: hx, Tier: tier}
-		site.SignX = hx
+		site := placeSettlement(ts, t, cursor, int(float64(front)*perTree*0.7)+30)
 
-		carve := carveSpec{x: hx, west: gapW, east: gapE, back: gapB}
+		carve := site.yards()
 		if t.Finished {
-			site.trees = plantMonumentGrove(ts, t, cursor, extent, front, back, carve)
+			site.trees = plantMonumentGrove(ts, t, site.X0, site.X1-site.X0, front, back, carve)
 		} else {
-			site.trees = plantWildGrove(ts, t, cursor, extent, front, back, carve)
+			site.trees = plantWildGrove(ts, t, site.X0, site.X1-site.X0, front, back, carve)
 		}
 		w.Sites = append(w.Sites, site)
 
@@ -125,38 +131,201 @@ func Build(seed uint64, towns []*model.Town) *World {
 		if xnoise.Unit(ts, 3) < 0.18 {
 			gap += 190 // an occasional long wilderness walk
 		}
-		cursor += extent + gap
+		cursor = site.X1 + gap
 	}
 	w.Width = cursor + eastWild
 	w.plantWilderness()
 	return w
 }
 
-// carveSpec is the hearth's yard. The settler felled what stood where the
-// cabin, the woodshed, and the chopping block went, and nothing more: trees
-// landing inside are pushed just clear, front rows past the dooryard, back
-// rows past the roofline, so the grove closes overhead instead of opening
-// into a plaza.
-type carveSpec struct{ x, west, east, back int }
+// placeSettlement lays a town's buildings around its hearth: biggest
+// nearest the home, alternating sides, a stand of trees' worth of gap
+// between every pair, the small forms sometimes set back between the tree
+// rows. The whole cluster then decides the site's extent.
+func placeSettlement(ts uint64, t *model.Town, cursor, treeRoom int) *Site {
+	tier := t.HearthTier()
+	hearthSeed := xnoise.Hash(ts, 0xCAB1)
+	gapW, gapE, _ := sprite.CabinYardGaps(tier, hearthSeed)
 
-func (c carveSpec) apply(ts uint64, x, i int, isBack bool) int {
-	gw, ge := c.west, c.east
-	if isBack {
-		gw, ge = c.back, c.back
+	// Edges of claimed ground, in dots relative to the hearth center.
+	westEdge, eastEdge := -gapW, gapE
+	side := 1
+	if xnoise.Hash(ts, 0x5E7)%2 == 0 {
+		side = -1
 	}
-	if x <= c.x-gw || x >= c.x+ge {
-		return x
+	var placed []BuildingSite
+	for bi, b := range t.Buildings() {
+		bseed := xnoise.Hash(ts, 0xB17D, uint64(bi))
+		mid := false
+		switch b.Form {
+		case model.FormShed, model.FormCrib, model.FormWorkshop:
+			mid = xnoise.Unit(bseed, 1) < 0.4
+		}
+		yw, ye, _ := sprite.BuildingYard(b.Form, b.Share)
+		if mid {
+			w, _ := sprite.BuildingDims(b.Form, b.Share)
+			yw, ye = w+2, w+2 // half-hidden: the trees keep only off its face
+		}
+		gap := 12 + int(xnoise.Unit(bseed, 2)*20)
+		var bx int
+		if side > 0 {
+			bx = eastEdge + gap + yw
+			eastEdge = bx + ye
+		} else {
+			bx = westEdge - gap - ye
+			westEdge = bx - yw
+		}
+		placed = append(placed, BuildingSite{B: b, X: bx, Mid: mid, Seed: bseed})
+		side = -side
+	}
+
+	extent := (eastEdge - westEdge) + treeRoom
+	x0 := cursor
+	hx := x0 - westEdge + treeRoom/2
+	site := &Site{
+		Town: t, X0: x0, X1: x0 + extent,
+		SignX:   hx,
+		Hearth:  Hearth{Seed: hearthSeed, X: hx, Tier: tier},
+		StakesX: hx + eastEdge + 4,
+		BeltW:   hx + westEdge,
+		BeltE:   hx + eastEdge,
+	}
+	for i := range placed {
+		placed[i].X += hx
+	}
+	site.Buildings = placed
+
+	// The well, once the town is more than a homestead: in the first gap
+	// east of the hearth's yard, where the paths cross.
+	if len(placed) >= 3 {
+		site.WellX = hx + gapE + 7
+	}
+	site.placeFences(ts)
+	return site
+}
+
+// placeFences runs split-rail fragments through the wider gaps between
+// neighboring front-plane yards. Broken by seed, never an enclosure.
+func (s *Site) placeFences(ts uint64) {
+	type edge struct {
+		idx      int // -1 hearth
+		lo, hi   int
+		frontRow bool
+	}
+	var edges []edge
+	gw, ge, _ := sprite.CabinYardGaps(s.Hearth.Tier, s.Hearth.Seed)
+	edges = append(edges, edge{-1, s.Hearth.X - gw, s.Hearth.X + ge, true})
+	for i, b := range s.Buildings {
+		if b.Mid {
+			continue
+		}
+		yw, ye, _ := sprite.BuildingYard(b.B.Form, b.B.Share)
+		edges = append(edges, edge{i, b.X - yw, b.X + ye, true})
+	}
+	sort.Slice(edges, func(i, j int) bool { return edges[i].lo < edges[j].lo })
+	for i := 1; i < len(edges); i++ {
+		l, r := edges[i-1], edges[i]
+		gap := r.lo - l.hi
+		if gap < 16 || xnoise.Unit(ts, 0xFE9, uint64(i)) < 0.35 {
+			continue // some neighbors never fenced anything
+		}
+		s.Fences = append(s.Fences, Fence{
+			X0: l.hi + 4, X1: r.lo - 4, A: l.idx, B: r.idx,
+			Seed: xnoise.Hash(ts, 0xFE5, uint64(i)),
+		})
+	}
+}
+
+// yardSpans is the settlement's claimed ground: merged intervals that trees
+// must stand clear of, one set for the front rows and one for the back.
+// The settlers felled what stood where the buildings went, and nothing more.
+type yardSpans struct {
+	front [][2]int
+	back  [][2]int
+	// The settlement belt: front trees inside it grow as understory, kept
+	// low by the settlers' axes. The old growth stands outside and behind.
+	beltLo, beltHi int
+}
+
+func (s *Site) yards() yardSpans {
+	ys := yardSpans{beltLo: s.BeltW, beltHi: s.BeltE}
+	gw, ge, gb := sprite.CabinYardGaps(s.Hearth.Tier, s.Hearth.Seed)
+	ys.front = append(ys.front, [2]int{s.Hearth.X - gw, s.Hearth.X + ge})
+	ys.back = append(ys.back, [2]int{s.Hearth.X - gb, s.Hearth.X + gb})
+	for _, b := range s.Buildings {
+		yw, ye, yb := sprite.BuildingYard(b.B.Form, b.B.Share)
+		if b.Mid {
+			w, _ := sprite.BuildingDims(b.B.Form, b.B.Share)
+			ys.front = append(ys.front, [2]int{b.X - w - 2, b.X + w + 2})
+			ys.back = append(ys.back, [2]int{b.X - yb, b.X + yb})
+			continue
+		}
+		ys.front = append(ys.front, [2]int{b.X - yw, b.X + ye})
+		ys.back = append(ys.back, [2]int{b.X - yb, b.X + yb})
+	}
+	if s.WellX != 0 {
+		ys.front = append(ys.front, [2]int{s.WellX - 6, s.WellX + 6})
+	}
+	ys.front = mergeSpans(ys.front)
+	ys.back = mergeSpans(ys.back)
+	return ys
+}
+
+func mergeSpans(in [][2]int) [][2]int {
+	if len(in) < 2 {
+		return in
+	}
+	sort.Slice(in, func(i, j int) bool { return in[i][0] < in[j][0] })
+	out := [][2]int{in[0]}
+	for _, sp := range in[1:] {
+		last := &out[len(out)-1]
+		if sp[0] <= last[1] {
+			if sp[1] > last[1] {
+				last[1] = sp[1]
+			}
+			continue
+		}
+		out = append(out, sp)
+	}
+	return out
+}
+
+// apply pushes a trunk out of any claimed yard to the nearest edge, with a
+// settler's pad of jitter. Once a direction is picked the trunk slides past
+// every further span in that direction, so it never lands inside a neighbor.
+func (ys yardSpans) apply(ts uint64, x, i int, isBack bool) int {
+	spans := ys.front
+	if isBack {
+		spans = ys.back
 	}
 	pad := int(xnoise.Unit(ts, 0x16, uint64(i), boolKey(isBack)) * 5)
-	if x < c.x {
-		return c.x - gw - pad
+	for _, sp := range spans {
+		if x <= sp[0] || x >= sp[1] {
+			continue
+		}
+		if x-sp[0] < sp[1]-x { // west is nearer: slide west past everything
+			out := sp[0] - pad
+			for j := len(spans) - 1; j >= 0; j-- {
+				if out > spans[j][0] && out < spans[j][1] {
+					out = spans[j][0] - pad
+				}
+			}
+			return out
+		}
+		out := sp[1] + pad
+		for _, sj := range spans {
+			if out > sj[0] && out < sj[1] {
+				out = sj[1] + pad
+			}
+		}
+		return out
 	}
-	return c.x + ge + pad
+	return x
 }
 
 // plantWildGrove scatters a town's trees with jittered spacing and varied
 // heights: a real grove, denser and taller near its heart.
-func plantWildGrove(ts uint64, t *model.Town, x0, extent, front, back int, carve carveSpec) []treeMeta {
+func plantWildGrove(ts uint64, t *model.Town, x0, extent, front, back int, carve yardSpans) []treeMeta {
 	var trees []treeMeta
 	place := func(i, n int, isBack bool) {
 		fi := 0.0
@@ -170,6 +339,10 @@ func plantWildGrove(ts uint64, t *model.Town, x0, extent, front, back int, carve
 		mul := center * xnoise.Range(ts, 0.68, 1.04, 0x12, uint64(i), boolKey(isBack))
 		if isBack {
 			mul *= 0.72
+		} else if carve.beltHi > carve.beltLo && x > carve.beltLo && x < carve.beltHi {
+			// Understory between the yards: no settler lets old growth
+			// overhang a roof. The giants stand outside and behind.
+			mul *= xnoise.Range(ts, 0.38, 0.55, 0x17, uint64(i))
 		}
 		trees = append(trees, treeMeta{
 			seed: xnoise.Hash(ts, 0x13, uint64(i), boolKey(isBack)),
@@ -187,7 +360,7 @@ func plantWildGrove(ts uint64, t *model.Town, x0, extent, front, back int, carve
 
 // plantMonumentGrove is the one place order is allowed: a finished town's
 // trees stand in calm symmetry, tallest at the center. Human intent, held.
-func plantMonumentGrove(ts uint64, t *model.Town, x0, extent, front, back int, carve carveSpec) []treeMeta {
+func plantMonumentGrove(ts uint64, t *model.Town, x0, extent, front, back int, carve yardSpans) []treeMeta {
 	var trees []treeMeta
 	place := func(i, n int, isBack bool) {
 		fi := 0.0
@@ -199,6 +372,8 @@ func plantMonumentGrove(ts uint64, t *model.Town, x0, extent, front, back int, c
 		mul := 1 - 0.42*fi*fi // clean symmetric fall-off
 		if isBack {
 			mul *= 0.72
+		} else if carve.beltHi > carve.beltLo && x > carve.beltLo && x < carve.beltHi {
+			mul *= 0.5 // a kept settlement's understory, trimmed even
 		}
 		trees = append(trees, treeMeta{
 			seed: xnoise.Hash(ts, 0x13, uint64(i), boolKey(isBack)),

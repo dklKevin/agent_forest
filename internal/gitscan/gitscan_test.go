@@ -185,3 +185,117 @@ func TestFingerprintChangesOnCommit(t *testing.T) {
 		t.Fatal("fingerprint did not change after a commit")
 	}
 }
+
+func TestDetectComponents(t *testing.T) {
+	kb := func(n int64) int64 { return n * 1024 }
+	files := []trackedFile{
+		{"README.md", kb(2)}, // root files belong to the hearth
+		{".github/ci.yml", kb(40)},
+		{"engine/a.go", kb(300)}, {"engine/b.go", kb(200)}, {"engine/c.go", kb(100)},
+		{"docs/a.md", kb(30)}, {"docs/b.md", kb(30)}, {"docs/c.md", kb(30)},
+		{"tiny/x.go", kb(1)}, // below the floor
+	}
+	comps := detectComponents(files)
+	if len(comps) != 2 {
+		t.Fatalf("components = %d (%+v), want 2", len(comps), comps)
+	}
+	if comps[0].Path != "engine" || comps[1].Path != "docs" {
+		t.Fatalf("wrong components or order: %+v", comps)
+	}
+
+	// A dominant wrapper is descended one level; siblings stay.
+	files = []trackedFile{
+		{"src/core/a.go", kb(500)}, {"src/core/b.go", kb(300)}, {"src/core/c.go", kb(100)},
+		{"src/util/a.go", kb(80)}, {"src/util/b.go", kb(40)}, {"src/util/c.go", kb(30)},
+		{"src/loose.go", kb(10)}, // directly in the wrapper: hearth's
+		{"docs/a.md", kb(20)}, {"docs/b.md", kb(20)}, {"docs/c.md", kb(20)},
+	}
+	comps = detectComponents(files)
+	want := map[string]string{"src/core": "core", "src/util": "util", "docs": "docs"}
+	if len(comps) != len(want) {
+		t.Fatalf("components = %+v, want %d", comps, len(want))
+	}
+	for _, c := range comps {
+		if want[c.Path] != c.Name {
+			t.Errorf("component %q name %q, want %q", c.Path, c.Name, want[c.Path])
+		}
+	}
+}
+
+func TestScanEmitsComponentsWithOwnClocks(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "village")
+	initRepo(t, dir)
+	old := time.Now().Add(-400 * 24 * time.Hour).Truncate(time.Second)
+	mid := time.Now().Add(-40 * 24 * time.Hour).Truncate(time.Second)
+	fresh := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
+	for _, d := range []string{"engine", "docs", "tests"} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	commitAt(t, dir, old, "docs/a.md", strings.Repeat("d", 9000))
+	commitAt(t, dir, old, "docs/b.md", strings.Repeat("d", 9000))
+	commitAt(t, dir, old, "docs/c.md", strings.Repeat("d", 9000))
+	commitAt(t, dir, mid, "tests/a_test.go", strings.Repeat("t", 9000))
+	commitAt(t, dir, mid, "tests/b_test.go", strings.Repeat("t", 9000))
+	commitAt(t, dir, mid, "tests/c_test.go", strings.Repeat("t", 9000))
+	commitAt(t, dir, fresh, "engine/a.go", strings.Repeat("e", 40000))
+	commitAt(t, dir, fresh, "engine/b.go", strings.Repeat("e", 40000))
+	commitAt(t, dir, fresh, "engine/c.go", strings.Repeat("e", 40000))
+
+	evs, err := Scan(dir, Known{}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	comp := map[string]events.Event{}
+	for _, e := range evs {
+		if e.Kind == events.KindComp {
+			comp[e.Path] = e
+		}
+	}
+	if len(comp) != 3 {
+		t.Fatalf("comp events = %d (%v), want 3", len(comp), comp)
+	}
+	if !comp["docs"].TS.Equal(old) {
+		t.Errorf("docs last touch %v, want %v", comp["docs"].TS, old)
+	}
+	if !comp["tests"].TS.Equal(mid) {
+		t.Errorf("tests last touch %v, want %v", comp["tests"].TS, mid)
+	}
+	if !comp["engine"].TS.Equal(fresh) {
+		t.Errorf("engine last touch %v, want %v", comp["engine"].TS, fresh)
+	}
+
+	// A rescan with the log's knowledge is silent.
+	known := Known{Announced: true, LastTS: fresh, Comps: map[string]KnownComp{}}
+	for p, e := range comp {
+		known.Comps[p] = KnownComp{Bytes: e.Bytes, LastTS: e.TS}
+	}
+	known.Mix = map[string]float64{}
+	evs, err = Scan(dir, known, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range evs {
+		if e.Kind == events.KindComp {
+			t.Errorf("silent rescan emitted comp event: %+v", e)
+		}
+	}
+
+	// A commit touching one directory advances only that component.
+	later := time.Now().Truncate(time.Second)
+	commitAt(t, dir, later, "docs/new.md", strings.Repeat("n", 9000))
+	evs, err = Scan(dir, known, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var compEvs []events.Event
+	for _, e := range evs {
+		if e.Kind == events.KindComp {
+			compEvs = append(compEvs, e)
+		}
+	}
+	if len(compEvs) != 1 || compEvs[0].Path != "docs" || !compEvs[0].TS.Equal(later) {
+		t.Fatalf("docs commit produced %+v, want one docs event at %v", compEvs, later)
+	}
+}

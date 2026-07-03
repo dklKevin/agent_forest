@@ -228,6 +228,16 @@ func KnownByRepo(evs []events.Event) map[string]gitscan.Known {
 				langTS[e.Repo] = e.TS
 				k.Mix = e.Mix
 			}
+		case events.KindComp:
+			if k.Comps == nil {
+				k.Comps = map[string]gitscan.KnownComp{}
+			}
+			c := k.Comps[e.Path]
+			c.Bytes = e.Bytes
+			if e.TS.After(c.LastTS) {
+				c.LastTS = e.TS
+			}
+			k.Comps[e.Path] = c
 		}
 		known[e.Repo] = k
 	}

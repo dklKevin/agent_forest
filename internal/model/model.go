@@ -5,6 +5,8 @@ package model
 
 import (
 	"math"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/dklKevin/agentforest/internal/events"
@@ -167,6 +169,10 @@ type Town struct {
 	// IdleOverride, when set, replaces the real idle time. It exists for the
 	// almanac so stages can be previewed without waiting real days.
 	IdleOverride *time.Duration
+	// CompIdleOverride overrides one building's idle time by component path.
+	// It exists for the revive animation, so a freshly touched building can
+	// ease back to life instead of snapping.
+	CompIdleOverride map[string]time.Duration
 }
 
 // NewTown derives a town from repo state.
@@ -214,9 +220,9 @@ func (t *Town) Stature(now time.Time) float64 {
 // full homestead. Like everything meaning-bearing, it is shape, not color.
 func (t *Town) HearthTier() int {
 	switch {
-	case t.TotalCommits < 200:
+	case t.TotalCommits < 20:
 		return 0
-	case t.TotalCommits < 2500:
+	case t.TotalCommits < 250:
 		return 1
 	default:
 		return 2
@@ -233,4 +239,131 @@ func (t *Town) TreeCount() int {
 		n = 13
 	}
 	return int(n)
+}
+
+// BuildingForm is a settlement structure, told apart by silhouette alone.
+type BuildingForm int
+
+const (
+	FormBarn        BuildingForm = iota // broad gambrel mass: the dominant component
+	FormHomeplace                       // a dwelling cabin: large components
+	FormWorkshop                        // single-slope working building: middle components
+	FormShed                            // small lean-to: minor components
+	FormCrib                            // slatted box on stilts: minor components
+	FormWatchtower                      // tall braced tower: the tests
+	FormSchoolhouse                     // gable with a bell cupola: the docs
+)
+
+var formNames = map[BuildingForm]string{
+	FormBarn: "barn", FormHomeplace: "cabin", FormWorkshop: "workshop",
+	FormShed: "shed", FormCrib: "crib", FormWatchtower: "watchtower",
+	FormSchoolhouse: "schoolhouse",
+}
+
+func (f BuildingForm) String() string { return formNames[f] }
+
+// Building is one component of the repo as a structure in the settlement.
+type Building struct {
+	Name   string
+	Path   string // component path: the stable identity
+	Form   BuildingForm
+	Share  float64 // of the largest component's bytes, 0..1
+	LastTS time.Time
+}
+
+// kindForName maps only the near-certain component names to special forms.
+// Wrong guesses are lies, so this set is deliberately small.
+func kindForName(name string) (BuildingForm, bool) {
+	switch strings.ToLower(name) {
+	case "test", "tests", "spec", "specs", "e2e", "__tests__", "testing", "testdata":
+		return FormWatchtower, true
+	case "doc", "docs", "documentation", "wiki":
+		return FormSchoolhouse, true
+	}
+	return 0, false
+}
+
+// Buildings derives the settlement: components sorted by weight, capped at
+// the village ceiling, each given a form. Confident kinds take their own
+// forms; everything else ranks by size against the largest code component.
+func (t *Town) Buildings() []Building {
+	if len(t.Components) == 0 {
+		return nil
+	}
+	comps := make([]*events.ComponentState, 0, len(t.Components))
+	for _, c := range t.Components {
+		comps = append(comps, c)
+	}
+	sort.Slice(comps, func(i, j int) bool {
+		if comps[i].Bytes != comps[j].Bytes {
+			return comps[i].Bytes > comps[j].Bytes
+		}
+		return comps[i].Path < comps[j].Path
+	})
+	if len(comps) > 12 {
+		comps = comps[:12]
+	}
+	var maxBytes int64
+	for _, c := range comps {
+		if _, kinded := kindForName(c.Name); !kinded {
+			maxBytes = c.Bytes
+			break
+		}
+	}
+	bs := make([]Building, 0, len(comps))
+	firstCode := true
+	for _, c := range comps {
+		b := Building{Name: c.Name, Path: c.Path, LastTS: c.LastTS}
+		if maxBytes > 0 {
+			b.Share = xnoise.Clamp(float64(c.Bytes)/float64(maxBytes), 0, 1)
+		}
+		if form, ok := kindForName(c.Name); ok {
+			b.Form = form
+		} else {
+			switch {
+			case firstCode:
+				b.Form, firstCode = FormBarn, false
+			case b.Share >= 0.45:
+				b.Form = FormHomeplace
+			case b.Share >= 0.15:
+				b.Form = FormWorkshop
+			default:
+				b.Form = FormShed
+				if xnoise.Hash(hashString(c.Path), 0xC71B)%2 == 0 {
+					b.Form = FormCrib
+				}
+			}
+		}
+		bs = append(bs, b)
+	}
+	return bs
+}
+
+// BuildingIdle is one building's effective idle time. The almanac's town
+// override slides every building forward while preserving each one's own
+// offset, so a preview of neglect keeps the village's internal structure.
+func (t *Town) BuildingIdle(b Building, now time.Time) time.Duration {
+	if d, ok := t.CompIdleOverride[b.Path]; ok {
+		return d
+	}
+	if t.IdleOverride != nil {
+		off := t.LastTS.Sub(b.LastTS)
+		if off < 0 {
+			off = 0
+		}
+		return *t.IdleOverride + off
+	}
+	if b.LastTS.IsZero() {
+		return 0
+	}
+	return now.Sub(b.LastTS)
+}
+
+// BuildingDecay is reclamation depth for one building at now. Buildings of a
+// finished town never decay: the whole settlement is kept.
+func (t *Town) BuildingDecay(b Building, now time.Time) float64 {
+	if t.Finished {
+		return 0
+	}
+	return DecayAt(t.BuildingIdle(b, now))
 }

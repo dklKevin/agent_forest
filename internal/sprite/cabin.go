@@ -20,6 +20,7 @@ type Cabin struct {
 	Lvl      uint8
 	Decay    float64 // 0 lived-in .. ~1 chimney and sills
 	Finished bool    // a kept homestead: shuttered, stocked, still
+	Bare     bool    // an outbuilding dwelling: cold chimney, no dooryard
 	Focused  bool
 }
 
@@ -114,8 +115,10 @@ func (p *P) DrawCabin(cb Cabin) {
 	p.cabinDoor(cb, lvl, d, cx, gyr, hw, side)
 	p.cabinWindows(cb, lvl, d, weather, cx, gyr, hw, side)
 	p.cabinChimney(cb, lvl, cx, roofY0, rise, span, wallW, side)
-	p.cabinWoodstore(cb, lvl, d, wallW, side)
-	p.cabinStump(cb, lvl, d, gyr, wallW, side)
+	if !cb.Bare {
+		p.cabinWoodstore(cb, lvl, d, wallW, side)
+		p.cabinStump(cb, lvl, d, gyr, wallW, side)
+	}
 
 	// The forest climbs the corners the way it climbs trunks.
 	p.vines(xnoise.Hash(cb.Seed, 0xC1), cb.X-wallW-2, cb.GroundY, wallH*4+8, lvl-40, d)
@@ -304,8 +307,8 @@ func (p *P) cabinChimney(cb Cabin, lvl uint8, cx, roofY0 int, rise, span float64
 			}
 		}
 	}
-	if cb.Finished {
-		return // a kept hearth is cold and cared for
+	if cb.Finished || cb.Bare {
+		return // a kept or outbuilding hearth is cold
 	}
 	fresh := 1 - xnoise.Smoothstep(0.008, 0.085, cb.Decay)
 	if fresh <= 0.02 {

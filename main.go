@@ -20,7 +20,7 @@ import (
 	"github.com/dklKevin/agentforest/internal/ui"
 )
 
-var version = "0.2.0"
+var version = "0.3.0"
 
 func usage() {
 	fmt.Print(`agentforest · a forest grown from your repositories
@@ -32,7 +32,7 @@ usage:
   agentforest refresh         rescan all connected roots
   agentforest exclude <name>  hide a town (history kept); include restores it
   agentforest --snapshot      print one frame and exit (for scripts and screenshots)
-  agentforest --gallery x     print a reference sheet: "species", "decay", or "homestead"
+  agentforest --gallery x     print a reference sheet: species | decay | homestead | settlement
 
 flags:
   --seed n        world seed (default 5)
@@ -43,7 +43,7 @@ flags:
   --at name       center the snapshot on a town
   --t sec         wind phase for the snapshot (default 2.5)
   --plain         no color escapes (shape-only output)
-  --gallery kind  print a reference sheet ("species", "decay", or "homestead")
+  --gallery kind  print a reference sheet: species | decay | homestead | settlement
   --version       print version
 
 Every subcommand answers --help.
@@ -68,7 +68,7 @@ func main() {
 		at       = fs.String("at", "", "center snapshot on town")
 		tphase   = fs.Float64("t", 2.5, "snapshot wind phase seconds")
 		plain    = fs.Bool("plain", false, "no color escapes")
-		gallery  = fs.String("gallery", "", "reference sheet: species | decay")
+		gallery  = fs.String("gallery", "", "reference sheet: species | decay | homestead | settlement")
 		ver      = fs.Bool("version", false, "print version")
 	)
 	fs.Parse(args)
@@ -86,7 +86,7 @@ func main() {
 	if *gallery != "" {
 		if err := printGallery(*gallery, *width, *height, prof); err != nil {
 			fmt.Println("error: " + err.Error())
-			fmt.Println("help: --gallery species | decay | homestead")
+			fmt.Println("help: --gallery species | decay | homestead | settlement")
 			os.Exit(2)
 		}
 		return
@@ -262,6 +262,37 @@ func printGallery(kind string, cw, ch int, prof canvas.Profile) error {
 			{2, 0.85, false, "winterwell", "skeletal"},
 			{2, 0.965, false, "winterwell", "ruins"},
 		}, int(float64(ch*4)*0.9))
+	case "settlement":
+		forms := []struct {
+			f     model.BuildingForm
+			share float64
+			label string
+		}{
+			{model.FormBarn, 1.0, "barn"},
+			{model.FormHomeplace, 0.8, "cabin"},
+			{model.FormWorkshop, 0.3, "workshop"},
+			{model.FormShed, 0.1, "shed"},
+			{model.FormCrib, 0.08, "crib"},
+			{model.FormWatchtower, 0.2, "watchtower"},
+			{model.FormSchoolhouse, 0.15, "schoolhouse"},
+		}
+		row := func(d float64, rgy int, caption string) {
+			step := cw * 2 / (len(forms) + 1)
+			for i, s := range forms {
+				x := step/2 + i*step
+				p.DrawBuilding(sprite.Building{
+					Seed: uint64(70 + i), X: x, GroundY: rgy,
+					Form: s.f, Share: s.share, Lvl: 126, Decay: d,
+				})
+				c.Text(x/2-len(s.label)/2, rgy/4+2, s.label, 120, 0)
+			}
+			x := step/2 + len(forms)*step
+			p.DrawWell(uint64(88), x, rgy, 122, d)
+			c.Text(x/2-2, rgy/4+2, "well", 120, 0)
+			c.Text(2, rgy/4+2, caption, 100, 0)
+		}
+		row(0, int(float64(ch*4)*0.42), "tended")
+		row(0.93, int(float64(ch*4)*0.9), "what remains")
 	default:
 		return fmt.Errorf("unknown gallery %q", kind)
 	}

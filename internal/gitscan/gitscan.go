@@ -88,6 +88,13 @@ type Known struct {
 	LastTS    time.Time          // newest activity timestamp seen
 	Tags      map[string]bool    // tag names already recorded
 	Mix       map[string]float64 // last language snapshot
+	Comps     map[string]KnownComp
+}
+
+// KnownComp is the last recorded observation of one component.
+type KnownComp struct {
+	Bytes  int64
+	LastTS time.Time
 }
 
 // Scan reads one repository and returns the events the log is missing. A
@@ -116,9 +123,11 @@ func Scan(path string, known Known, now time.Time) ([]events.Event, error) {
 	if err == nil {
 		evs = append(evs, tags...)
 	}
-	if mix := langMix(path); mix != nil && mixChanged(known.Mix, mix) {
+	files := trackedFiles(path)
+	if mix := langMix(files); mix != nil && mixChanged(known.Mix, mix) {
 		evs = append(evs, events.Event{Kind: events.KindLangs, Repo: path, TS: now, Mix: mix})
 	}
+	evs = append(evs, compEvents(path, files, known.Comps)...)
 	return evs, nil
 }
 
@@ -203,29 +212,45 @@ func tagEvents(path string, knownTags map[string]bool) ([]events.Event, error) {
 	return evs, nil
 }
 
-// langMix weighs tracked files by size on disk and returns fractions per
-// language, or nil when nothing recognizable is tracked.
-func langMix(path string) map[string]float64 {
+// trackedFile is one git-tracked regular file with its size on disk.
+type trackedFile struct {
+	rel  string
+	size int64
+}
+
+// trackedFiles lists the repository's tracked regular files once; the
+// language mix and the component map are both derived from this single pass.
+func trackedFiles(path string) []trackedFile {
 	out, err := runGit(path, "ls-files", "-z")
 	if err != nil {
 		return nil
 	}
-	sizes := map[string]int64{}
-	var total int64
+	var files []trackedFile
 	for _, rel := range strings.Split(out, "\x00") {
 		if rel == "" {
-			continue
-		}
-		lang, ok := langByExt[strings.ToLower(filepath.Ext(rel))]
-		if !ok {
 			continue
 		}
 		info, err := os.Lstat(filepath.Join(path, rel))
 		if err != nil || !info.Mode().IsRegular() {
 			continue
 		}
-		sizes[lang] += info.Size()
-		total += info.Size()
+		files = append(files, trackedFile{rel: rel, size: info.Size()})
+	}
+	return files
+}
+
+// langMix weighs tracked files by size and returns fractions per language,
+// or nil when nothing recognizable is tracked.
+func langMix(files []trackedFile) map[string]float64 {
+	sizes := map[string]int64{}
+	var total int64
+	for _, f := range files {
+		lang, ok := langByExt[strings.ToLower(filepath.Ext(f.rel))]
+		if !ok {
+			continue
+		}
+		sizes[lang] += f.size
+		total += f.size
 	}
 	if total == 0 {
 		return nil
@@ -235,6 +260,161 @@ func langMix(path string) map[string]float64 {
 		mix[lang] = float64(n) / float64(total)
 	}
 	return mix
+}
+
+// Component is a major directory of a repository: a building in the making.
+type Component struct {
+	Name  string // base name, the display name
+	Path  string // repo-relative path, the stable identity
+	Bytes int64
+	Files int
+}
+
+// Directories that usually exist only to hold the real components. When one
+// of these dominates the repo, the components live a level deeper.
+var wrapperDirs = map[string]bool{
+	"src": true, "lib": true, "libs": true, "source": true, "sources": true,
+	"packages": true, "pkg": true, "internal": true, "app": true, "apps": true,
+	"modules": true, "crates": true,
+}
+
+// The settlement ceiling: no town keeps more than this many buildings.
+const maxComponents = 12
+
+// detectComponents maps tracked files to the repo's major directories.
+// Top-level directories are the components, except that a single dominant
+// wrapper (src, packages, internal...) is descended one level so the true
+// structure shows. Files at the root belong to the hearth, dot-directories
+// are ignored, and tiny directories fall below the floor.
+func detectComponents(files []trackedFile) []Component {
+	type agg struct {
+		bytes int64
+		files int
+	}
+	var total int64
+	top := map[string]*agg{}
+	for _, f := range files {
+		total += f.size
+		dir, _, ok := strings.Cut(f.rel, "/")
+		if !ok || strings.HasPrefix(dir, ".") {
+			continue
+		}
+		a := top[dir]
+		if a == nil {
+			a = &agg{}
+			top[dir] = a
+		}
+		a.bytes += f.size
+		a.files++
+	}
+	if total == 0 {
+		return nil
+	}
+
+	// A wrapper that holds most of the repo is descended one level.
+	wrapper := ""
+	for dir, a := range top {
+		if wrapperDirs[dir] && float64(a.bytes) >= 0.7*float64(total) {
+			wrapper = dir
+			break
+		}
+	}
+	group := map[string]*agg{}
+	name := map[string]string{}
+	for dir, a := range top {
+		if dir == wrapper {
+			continue
+		}
+		group[dir] = a
+		name[dir] = dir
+	}
+	if wrapper != "" {
+		prefix := wrapper + "/"
+		for _, f := range files {
+			if !strings.HasPrefix(f.rel, prefix) {
+				continue
+			}
+			rest := f.rel[len(prefix):]
+			dir, _, ok := strings.Cut(rest, "/")
+			if !ok || strings.HasPrefix(dir, ".") {
+				continue // files directly inside the wrapper stay with the hearth
+			}
+			key := prefix + dir
+			a := group[key]
+			if a == nil {
+				a = &agg{}
+				group[key] = a
+			}
+			a.bytes += f.size
+			a.files++
+			name[key] = dir
+		}
+	}
+
+	var comps []Component
+	for key, a := range group {
+		if a.files < 3 || float64(a.bytes) < 0.01*float64(total) {
+			continue // below the floor: no building earned
+		}
+		comps = append(comps, Component{Name: name[key], Path: key, Bytes: a.bytes, Files: a.files})
+	}
+	sort.Slice(comps, func(i, j int) bool {
+		if comps[i].Bytes != comps[j].Bytes {
+			return comps[i].Bytes > comps[j].Bytes
+		}
+		return comps[i].Path < comps[j].Path
+	})
+	if len(comps) > maxComponents {
+		comps = comps[:maxComponents]
+	}
+	return comps
+}
+
+// compLastTouch asks git when a component's path last appeared in a commit
+// on any ref.
+func compLastTouch(path, comp string) (time.Time, error) {
+	out, err := runGit(path, "log", "--all", "-1", "--format=%ct", "--", comp)
+	if err != nil {
+		return time.Time{}, err
+	}
+	sec, err := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("component %s has no commit history", comp)
+	}
+	return time.Unix(sec, 0), nil
+}
+
+// compEvents emits an observation for every component that is new, freshly
+// touched, or materially resized since the log last looked. One quick git
+// call per component; a component that vanished emits nothing and its last
+// observation stands forever.
+func compEvents(path string, files []trackedFile, known map[string]KnownComp) []events.Event {
+	comps := detectComponents(files)
+	var total int64
+	for _, f := range files {
+		total += f.size
+	}
+	var evs []events.Event
+	for _, c := range comps {
+		last, err := compLastTouch(path, c.Path)
+		if err != nil {
+			continue
+		}
+		prev, had := known[c.Path]
+		eps := prev.Bytes / 8
+		if eps < 16*1024 {
+			eps = 16 * 1024
+		}
+		grown := c.Bytes-prev.Bytes > eps || prev.Bytes-c.Bytes > eps
+		if had && !last.After(prev.LastTS) && !grown {
+			continue
+		}
+		evs = append(evs, events.Event{
+			Kind: events.KindComp, Repo: path, TS: last,
+			Name: c.Name, Path: c.Path, Bytes: c.Bytes, Files: c.Files,
+		})
+	}
+	return evs
 }
 
 // langByExt maps file extensions to the languages the forest knows how to

@@ -212,24 +212,17 @@ func (w *World) decayInfluence(wx float64, now time.Time) float64 {
 	return best
 }
 
-// sitePass draws one town's grove (back rows or front rows), plus the
-// forest's own regrowth once decay is deep. The homestead goes down between
-// the rows: over the back trunks, under the front canopy, in the woods.
+// sitePass draws one town's grove (back rows or front rows) and its
+// settlement, plus the forest's own regrowth once decay is deep. Mid-set
+// buildings go down with the back rows so the front canopy closes over
+// them; the hearth and front buildings go down under the front canopy.
 func (w *World) sitePass(p *sprite.P, f Frame, s *Site, dw int, vs float64, ground func(float64) int, backRow bool) {
 	d := s.Town.Decay(f.Now)
 	stature := s.Town.Stature(f.Now)
-	if !backRow {
-		hx := float64(s.Hearth.X) - f.Cam
-		if hx > -90 && hx < float64(dw)+90 {
-			p.DrawCabin(sprite.Cabin{
-				Seed: s.Hearth.Seed, X: int(hx),
-				GroundY: ground(float64(s.Hearth.X)),
-				Tier:    s.Hearth.Tier,
-				Lvl:     128, Decay: d,
-				Finished: s.Town.Finished,
-				Focused:  f.Focus == s,
-			})
-		}
+	if backRow {
+		defer w.settlementPass(p, f, s, dw, vs, ground, true)
+	} else {
+		w.settlementPass(p, f, s, dw, vs, ground, false)
 	}
 	for _, tm := range s.trees {
 		if tm.back != backRow {
@@ -267,6 +260,78 @@ func (w *World) sitePass(p *sprite.P, f Frame, s *Site, dw int, vs float64, grou
 	}
 }
 
+// settlementPass draws the buildings of one depth plane, and with the front
+// plane the settlement's connective tissue: the hearth, the well, worn
+// footpaths, and the split-rail fragments between the yards.
+func (w *World) settlementPass(p *sprite.P, f Frame, s *Site, dw int, vs float64, ground func(float64) int, midPlane bool) {
+	for _, b := range s.Buildings {
+		if b.Mid != midPlane {
+			continue
+		}
+		sx := float64(b.X) - f.Cam
+		if sx < -90 || sx > float64(dw)+90 {
+			continue
+		}
+		gy := ground(float64(b.X))
+		lvl := uint8(126)
+		if midPlane {
+			gy -= int(6 * vs) // set back with the rear rank, half-hidden
+			lvl = 110
+		}
+		p.DrawBuilding(sprite.Building{
+			Seed: b.Seed, X: int(sx), GroundY: gy,
+			Form: b.B.Form, Share: b.B.Share,
+			Lvl: lvl, Decay: s.Town.BuildingDecay(b.B, f.Now),
+			Finished: s.Town.Finished,
+			Focused:  f.Focus == s,
+		})
+		if !midPlane {
+			// The worn path from this door back toward the hearth.
+			p.DrawFootpath(xnoise.Hash(b.Seed, 0xFA7), int(sx), s.Hearth.X-int(f.Cam), gy,
+				s.Town.BuildingDecay(b.B, f.Now))
+		}
+	}
+	if midPlane {
+		return
+	}
+	hx := float64(s.Hearth.X) - f.Cam
+	if hx > -90 && hx < float64(dw)+90 {
+		p.DrawCabin(sprite.Cabin{
+			Seed: s.Hearth.Seed, X: int(hx),
+			GroundY: ground(float64(s.Hearth.X)),
+			Tier:    s.Hearth.Tier,
+			Lvl:     128, Decay: s.Town.Decay(f.Now),
+			Finished: s.Town.Finished,
+			Focused:  f.Focus == s,
+		})
+	}
+	if s.WellX != 0 {
+		wx := float64(s.WellX) - f.Cam
+		if wx > -20 && wx < float64(dw)+20 {
+			p.DrawWell(xnoise.Hash(w.Seed, 0x11E1, uint64(s.WellX)), int(wx),
+				ground(float64(s.WellX)), 122, s.Town.Decay(f.Now))
+		}
+	}
+	for _, fc := range s.Fences {
+		x0, x1 := float64(fc.X0)-f.Cam, float64(fc.X1)-f.Cam
+		if x1 < -20 || x0 > float64(dw)+20 {
+			continue
+		}
+		dA, dB := s.Town.Decay(f.Now), s.Town.Decay(f.Now)
+		if fc.A >= 0 {
+			dA = s.Town.BuildingDecay(s.Buildings[fc.A].B, f.Now)
+		}
+		if fc.B >= 0 {
+			dB = s.Town.BuildingDecay(s.Buildings[fc.B].B, f.Now)
+		}
+		if dB < dA {
+			dA = dB // a fence stands while either neighbor still tends it
+		}
+		gy := ground((float64(fc.X0) + float64(fc.X1)) / 2)
+		p.DrawFence(fc.Seed, int(x0), int(x1), gy, 118, dA)
+	}
+}
+
 // signPass mounts the town's name board against its homestead, and plants
 // the release stakes along the trail east of the dooryard.
 func (w *World) signPass(p *sprite.P, f Frame, s *Site, dw int, vs float64, ground func(float64) int) {
@@ -276,8 +341,8 @@ func (w *World) signPass(p *sprite.P, f Frame, s *Site, dw int, vs float64, grou
 	}
 	d := s.Town.Decay(f.Now)
 	gy := ground(float64(s.SignX))
-	wallW, _, _ := sprite.CabinDims(s.Hearth.Tier)
-	p.DrawTags(xnoise.Hash(w.Seed, 0x7A6, uint64(s.SignX)), int(sx)+wallW+4, gy, len(s.Town.Tags), 100, d)
+	stakes := s.StakesX - int(f.Cam)
+	p.DrawTags(xnoise.Hash(w.Seed, 0x7A6, uint64(s.SignX)), stakes, ground(float64(s.StakesX)), len(s.Town.Tags), 100, d)
 	signX, signGY, hang, armC := sprite.CabinSignMount(
 		s.Hearth.Tier, s.Hearth.Seed, int(sx), gy, len(s.Town.Name)+4, d)
 	if !hang {

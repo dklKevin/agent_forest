@@ -111,26 +111,28 @@ type Model struct {
 	scanning    bool   // one scan at a time; also pauses polling
 	startupScan bool   // Init reconciles once to catch up on closed-time commits
 
-	fps      map[string]string // repo path -> cheap change fingerprint
-	lastPoll time.Time
-	revives  map[string]*reviveAnim // repo path -> transition
-	status   string                 // transient toast at the bottom
-	statusAt time.Time
+	fps         map[string]string // repo path -> cheap change fingerprint
+	lastPoll    time.Time
+	revives     map[string]*reviveAnim // repo path -> transition
+	compRevives map[string]*reviveAnim // repo path \x00 component -> transition
+	status      string                 // transient toast at the bottom
+	statusAt    time.Time
 }
 
 // New builds the UI over a laid-out world.
 func New(cfg Config) Model {
 	m := Model{
-		world:   cfg.World,
-		app:     cfg.App,
-		seed:    cfg.Seed,
-		demo:    cfg.Demo,
-		start:   time.Now(),
-		now:     time.Now(),
-		spring:  harmonica.NewSpring(harmonica.FPS(moveFPS), 5.5, 0.9),
-		hint:    true,
-		fps:     map[string]string{},
-		revives: map[string]*reviveAnim{},
+		world:       cfg.World,
+		app:         cfg.App,
+		seed:        cfg.Seed,
+		demo:        cfg.Demo,
+		start:       time.Now(),
+		now:         time.Now(),
+		spring:      harmonica.NewSpring(harmonica.FPS(moveFPS), 5.5, 0.9),
+		hint:        true,
+		fps:         map[string]string{},
+		revives:     map[string]*reviveAnim{},
+		compRevives: map[string]*reviveAnim{},
 	}
 	if cfg.Onboard {
 		m.mode = connectInput
@@ -366,7 +368,8 @@ func (m *Model) maybePoll() tea.Cmd {
 	return scanCmd(m.app, scanLive, "", changed)
 }
 
-// stepRevives eases reviving towns from their old decay back to the truth.
+// stepRevives eases reviving towns, and reviving buildings, from their old
+// decay back to the truth.
 func (m *Model) stepRevives() {
 	for path, anim := range m.revives {
 		s := m.siteByPath(path)
@@ -385,6 +388,25 @@ func (m *Model) stepRevives() {
 		ov := model.IdleForDecay(d)
 		s.Town.IdleOverride = &ov
 	}
+	for key, anim := range m.compRevives {
+		path, comp, _ := strings.Cut(key, "\x00")
+		s := m.siteByPath(path)
+		if s == nil {
+			delete(m.compRevives, key)
+			continue
+		}
+		p := float64(time.Since(anim.start)) / float64(reviveDur)
+		if p >= 1 {
+			delete(s.Town.CompIdleOverride, comp)
+			delete(m.compRevives, key)
+			continue
+		}
+		ease := p * p * (3 - 2*p)
+		if s.Town.CompIdleOverride == nil {
+			s.Town.CompIdleOverride = map[string]time.Duration{}
+		}
+		s.Town.CompIdleOverride[comp] = model.IdleForDecay(anim.from * (1 - ease))
+	}
 }
 
 func (m Model) scanDone(msg scanDoneMsg) (tea.Model, tea.Cmd) {
@@ -399,11 +421,17 @@ func (m Model) scanDone(msg scanDoneMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if msg.rep.NewEvents > 0 {
-		// Remember how deep each changed town stood before the news.
+		// Remember how deep each changed town, and each of its buildings,
+		// stood before the news.
 		oldDecay := map[string]float64{}
+		oldComp := map[string]float64{}
 		for _, s := range m.world.Sites {
-			if s.Town.Path != "" {
-				oldDecay[s.Town.Path] = s.Town.Decay(m.now)
+			if s.Town.Path == "" {
+				continue
+			}
+			oldDecay[s.Town.Path] = s.Town.Decay(m.now)
+			for _, b := range s.Buildings {
+				oldComp[s.Town.Path+"\x00"+b.B.Path] = s.Town.BuildingDecay(b.B, m.now)
 			}
 		}
 		m.rebuildWorld()
@@ -417,6 +445,18 @@ func (m Model) scanDone(msg scanDoneMsg) (tea.Model, tea.Cmd) {
 			if was-nowD > 0.02 {
 				m.revives[path] = &reviveAnim{from: was, start: time.Now()}
 				revived = append(revived, s.Town.Name)
+			}
+			// The precise stir: buildings whose components were touched
+			// shake off their own decay, even when the town was awake.
+			for _, b := range s.Buildings {
+				key := s.Town.Path + "\x00" + b.B.Path
+				wasB, had := oldComp[key]
+				if !had {
+					continue
+				}
+				if wasB-s.Town.BuildingDecay(b.B, m.now) > 0.02 {
+					m.compRevives[key] = &reviveAnim{from: wasB, start: time.Now()}
+				}
 			}
 		}
 		switch {
@@ -811,6 +851,28 @@ func (m Model) drawInspect() {
 	}
 	if t.Path != "" {
 		lines = append(lines, line{collapseHome(t.Path), 110, 0})
+	}
+	// The settlement: what stands here, and how each building fares.
+	if bs := t.Buildings(); len(bs) > 0 {
+		lines = append(lines, line{"", 0, 0})
+		show := bs
+		if len(show) > 6 {
+			show = show[:6]
+		}
+		for _, b := range show {
+			stage := model.StageOf(t.BuildingDecay(b, m.now)).String()
+			if t.Finished {
+				stage = "kept"
+			}
+			name := b.Name
+			if len(name) > 15 {
+				name = name[:14] + "…"
+			}
+			lines = append(lines, line{fmt.Sprintf("%-12s %-16s %s", b.Form, name, stage), 135, 0})
+		}
+		if len(bs) > 6 {
+			lines = append(lines, line{fmt.Sprintf("and %d more", len(bs)-6), 110, 0})
+		}
 	}
 	m.panel(lines)
 }

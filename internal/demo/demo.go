@@ -18,24 +18,61 @@ type spec struct {
 	tags     int
 	mix      map[string]float64
 	finished bool
+	comps    []comp
+}
+
+// comp is one demo component: share is its weight relative to the largest,
+// idleDays is its own quiet, independent of the town's.
+type comp struct {
+	name     string
+	share    float64
+	files    int
+	idleDays float64
 }
 
 // The demo cast. West to east this reads as a life: an ancient finished
-// monument, a thriving old-growth town, the ruins of something once large,
-// and at the far east a two-month sapling clearing before open dark.
+// village, a thriving old-growth town with one quarter gone quiet, the ruins
+// of something once large, and at the far east a lone sapling hut before
+// open dark.
 var cast = []spec{
-	{"mothgate", 9.2, 7800, 400, 12, map[string]float64{"c": 0.86, "shell": 0.14}, true},
-	{"winterwell", 8.5, 6200, 0.2, 14, map[string]float64{"go": 0.81, "shell": 0.12, "html": 0.07}, false},
-	{"hollowlamp", 7.1, 4100, 780, 7, map[string]float64{"go": 0.74, "javascript": 0.26}, false},
-	{"tidepool", 6.0, 3100, 45, 9, map[string]float64{"python": 0.88, "shell": 0.12}, false},
-	{"embermill", 5.2, 380, 320, 2, map[string]float64{"shell": 0.93, "make": 0.07}, false},
-	{"lanternfish", 4.1, 2400, 2, 11, map[string]float64{"rust": 0.9, "toml": 0.1}, false},
-	{"foxglove", 3.2, 900, 9, 4, map[string]float64{"swift": 0.95, "shell": 0.05}, false},
-	{"paperboat", 2.3, 640, 130, 3, map[string]float64{"typescript": 0.83, "css": 0.17}, false},
-	{"thornbook", 1.6, 300, 95, 5, map[string]float64{"rust": 0.97, "shell": 0.03}, true},
-	{"driftnet", 1.1, 480, 5, 2, map[string]float64{"zig": 0.9, "c": 0.1}, false},
-	{"quietmail", 0.6, 210, 1.2, 1, map[string]float64{"typescript": 0.78, "sql": 0.22}, false},
-	{"mossjar", 0.17, 60, 0.1, 0, map[string]float64{"lua": 1.0}, false},
+	{"mothgate", 9.2, 7800, 400, 12, map[string]float64{"c": 0.86, "shell": 0.14}, true, []comp{
+		{"core", 1.0, 120, 400}, {"gate", 0.55, 60, 400}, {"tools", 0.2, 30, 420},
+		{"docs", 0.12, 20, 430}, {"tests", 0.18, 44, 400}, {"scripts", 0.06, 9, 500},
+	}},
+	{"winterwell", 8.5, 6200, 0.2, 14, map[string]float64{"go": 0.81, "shell": 0.12, "html": 0.07}, false, []comp{
+		{"engine", 1.0, 140, 0.2}, {"server", 0.62, 80, 1.5}, {"cli", 0.34, 40, 6},
+		{"store", 0.2, 26, 12}, {"docs", 0.1, 18, 320}, {"tests", 0.22, 60, 0.7},
+		{"proto", 0.08, 9, 90}, {"scripts", 0.05, 7, 45},
+	}},
+	{"hollowlamp", 7.1, 4100, 780, 7, map[string]float64{"go": 0.74, "javascript": 0.26}, false, []comp{
+		{"lamp", 1.0, 90, 780}, {"web", 0.5, 55, 800}, {"docs", 0.1, 14, 900},
+		{"tests", 0.15, 30, 780}, {"assets", 0.24, 40, 860},
+	}},
+	{"tidepool", 6.0, 3100, 45, 9, map[string]float64{"python": 0.88, "shell": 0.12}, false, []comp{
+		{"pool", 1.0, 70, 45}, {"agents", 0.4, 34, 60}, {"docs", 0.09, 12, 200}, {"tests", 0.2, 40, 45},
+	}},
+	{"embermill", 5.2, 380, 320, 2, map[string]float64{"shell": 0.93, "make": 0.07}, false, []comp{
+		{"mill", 1.0, 30, 320}, {"hooks", 0.2, 12, 400},
+	}},
+	{"lanternfish", 4.1, 2400, 2, 11, map[string]float64{"rust": 0.9, "toml": 0.1}, false, []comp{
+		{"fish", 1.0, 80, 2}, {"lure", 0.5, 30, 3}, {"tests", 0.17, 26, 2}, {"docs", 0.08, 10, 30},
+	}},
+	{"foxglove", 3.2, 900, 9, 4, map[string]float64{"swift": 0.95, "shell": 0.05}, false, []comp{
+		{"glove", 1.0, 44, 9}, {"kit", 0.3, 18, 20}, {"tests", 0.12, 14, 9},
+	}},
+	{"paperboat", 2.3, 640, 130, 3, map[string]float64{"typescript": 0.83, "css": 0.17}, false, []comp{
+		{"boat", 1.0, 38, 130}, {"site", 0.35, 22, 150}, {"tests", 0.1, 12, 170},
+	}},
+	{"thornbook", 1.6, 300, 95, 5, map[string]float64{"rust": 0.97, "shell": 0.03}, true, []comp{
+		{"book", 1.0, 40, 95}, {"tests", 0.2, 20, 95}, {"docs", 0.1, 9, 110},
+	}},
+	{"driftnet", 1.1, 480, 5, 2, map[string]float64{"zig": 0.9, "c": 0.1}, false, []comp{
+		{"net", 1.0, 30, 5}, {"knots", 0.25, 12, 8},
+	}},
+	{"quietmail", 0.6, 210, 1.2, 1, map[string]float64{"typescript": 0.78, "sql": 0.22}, false, []comp{
+		{"mail", 1.0, 26, 1.2}, {"docs", 0.1, 6, 40},
+	}},
+	{"mossjar", 0.17, 60, 0.1, 0, map[string]float64{"lua": 1.0}, false, nil},
 }
 
 // Events generates the demo event log at now with a fixed seed.
@@ -53,6 +90,17 @@ func Events(seed uint64, now time.Time) []events.Event {
 			events.Event{Kind: events.KindLangs, Repo: s.name, TS: last, Mix: s.mix},
 		)
 		evs = append(evs, activity(rs, s.name, first, last, s.commits)...)
+		for _, c := range s.comps {
+			touched := now.Add(-time.Duration(c.idleDays * 24 * float64(time.Hour)))
+			if touched.Before(first) {
+				touched = first
+			}
+			evs = append(evs, events.Event{
+				Kind: events.KindComp, Repo: s.name, TS: touched,
+				Name: c.name, Path: c.name,
+				Bytes: int64(c.share * 800 * 1024), Files: c.files,
+			})
+		}
 		for k := 0; k < s.tags; k++ {
 			frac := 0.15 + 0.85*float64(k)/float64(maxi(s.tags-1, 1))
 			ts := lerpTime(first, last, frac)

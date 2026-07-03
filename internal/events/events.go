@@ -26,6 +26,10 @@ const (
 	KindTag Kind = "tag"
 	// KindLangs is a language-mix snapshot (fractions summing to ~1).
 	KindLangs Kind = "langs"
+	// KindComp is a component observation: a major directory of the repo,
+	// with its size and the time it was last touched. Components become the
+	// buildings of a town's settlement.
+	KindComp Kind = "comp"
 )
 
 // Event is one record in the append-only log.
@@ -37,6 +41,20 @@ type Event struct {
 	Commits int                `json:"commits,omitempty"`
 	Name    string             `json:"name,omitempty"`
 	Mix     map[string]float64 `json:"mix,omitempty"`
+	Bytes   int64              `json:"bytes,omitempty"`
+	Files   int                `json:"files,omitempty"`
+}
+
+// ComponentState is the derived state of one component: a major directory
+// that earns a building in the town's settlement. A component that vanishes
+// from the repo simply stops receiving events; its LastTS freezes and the
+// forest does the rest.
+type ComponentState struct {
+	Name   string // display name, the directory's base name
+	Path   string // repo-relative path, the stable identity
+	Bytes  int64
+	Files  int
+	LastTS time.Time // when this component was last touched by a commit
 }
 
 // RepoState is the derived, render-facing summary of one repository.
@@ -48,6 +66,7 @@ type RepoState struct {
 	TotalCommits int
 	Tags         []string
 	Mix          map[string]float64
+	Components   map[string]*ComponentState // keyed by component path
 }
 
 // PrimaryLang returns the largest share of the language mix.
@@ -103,6 +122,23 @@ func Reduce(evs []Event) []*RepoState {
 			r.Tags = append(r.Tags, e.Name)
 		case KindLangs:
 			r.Mix = e.Mix
+		case KindComp:
+			if r.Components == nil {
+				r.Components = map[string]*ComponentState{}
+			}
+			c := r.Components[e.Path]
+			if c == nil {
+				c = &ComponentState{Path: e.Path}
+				r.Components[e.Path] = c
+			}
+			if e.Name != "" {
+				c.Name = e.Name
+			}
+			c.Bytes = e.Bytes
+			c.Files = e.Files
+			if e.TS.After(c.LastTS) {
+				c.LastTS = e.TS
+			}
 		}
 	}
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].FirstTS.Before(ordered[j].FirstTS) })

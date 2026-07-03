@@ -17,6 +17,14 @@ While a repo is being worked, woodsmoke rises, the cord is stacked under the lea
 Leave it, and the traces scatter, the roof opens, the walls fall, until only the stone chimney stands.
 The chimney always stands.
 
+A repo with real structure grows past a homestead into a settlement.
+Its major directories stand as buildings around the hearth: the dominant component is the barn, the tests keep a watchtower, the docs keep a schoolhouse, and the rest take cabins, workshops, and sheds by their weight.
+Every building lives and dies on its own component's clock.
+Work the engine daily and let the docs rot, and the schoolhouse will be breaking apart while the barn doors stand open with hay at the threshold.
+A directory deleted from the repo keeps its building forever, falling slowly into the settlement's haunted quarter.
+Worn footpaths and split-rail fence fragments tie the yards together, understory grows between the buildings, and the old growth stands behind the rooflines.
+The inspect panel names each building's component and stage; the forest itself stays numberless.
+
 ## The rules that make it itself
 
 - **Shape carries meaning, never color.**
@@ -91,6 +99,7 @@ agentforest --snapshot --demo --plain --width 170 --height 40 --at winterwell
 agentforest --gallery species
 agentforest --gallery decay
 agentforest --gallery homestead
+agentforest --gallery settlement
 ```
 
 Snapshots accept `--seed n`, `--demo`, `--width n`, `--height n`, `--at name`, `--t sec`, and `--plain`.
