@@ -18,7 +18,8 @@ Leave it, and the traces scatter, the roof opens, the walls fall, until only the
 The chimney always stands.
 
 A repo with real structure grows past a homestead into a settlement.
-Its major directories stand as buildings around the hearth: the dominant component is the barn, the tests keep a watchtower, the docs keep a schoolhouse, and the rest take cabins, workshops, and sheds by their weight.
+Its major directories stand as buildings around the hearth, chosen by file spread as well as byte weight so one oversized generated artifact cannot swallow the rest of a working tree.
+The dominant component is the barn, the tests keep a watchtower, the docs keep a schoolhouse, and the rest take cabins, workshops, and sheds by their weight.
 Every building lives and dies on its own component's clock.
 Work the engine daily and let the docs rot, and the schoolhouse will be breaking apart while the barn doors stand open with hay at the threshold.
 A directory deleted from the repo keeps its building forever, falling slowly into the settlement's haunted quarter.

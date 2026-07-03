@@ -285,7 +285,8 @@ const maxComponents = 12
 // Top-level directories are the components, except that a single dominant
 // wrapper (src, packages, internal...) is descended one level so the true
 // structure shows. Files at the root belong to the hearth, dot-directories
-// are ignored, and tiny directories fall below the floor.
+// are ignored, and directories must clear the file floor plus either the
+// byte-share or file-share materiality floor.
 func detectComponents(files []trackedFile) []Component {
 	type agg struct {
 		bytes int64
@@ -351,9 +352,17 @@ func detectComponents(files []trackedFile) []Component {
 		}
 	}
 
+	totalFiles := len(files)
 	var comps []Component
 	for key, a := range group {
-		if a.files < 3 || float64(a.bytes) < 0.01*float64(total) {
+		// A directory earns a building when it clears the absolute file floor
+		// and is material by bytes OR by file count. Flooring on file share as
+		// well as byte share keeps a directory of real code from vanishing when
+		// a single large generated/vendored/lock file elsewhere dominates the
+		// repo's byte total and drags every sibling under the byte floor.
+		byteShare := float64(a.bytes) / float64(total)
+		fileShare := float64(a.files) / float64(totalFiles)
+		if a.files < 3 || (byteShare < 0.01 && fileShare < 0.01) {
 			continue // below the floor: no building earned
 		}
 		comps = append(comps, Component{Name: name[key], Path: key, Bytes: a.bytes, Files: a.files})

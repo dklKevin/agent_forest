@@ -222,6 +222,39 @@ func TestDetectComponents(t *testing.T) {
 	}
 }
 
+// TestDetectComponentsDominantFileKeepsSiblings pins the component-detection
+// floor bug: a single large generated/vendored/lock file in one directory must
+// not suppress sibling directories of real code. Because the byte floor is
+// relative to the repo total, engine/'s 20 KB blob would otherwise drag every
+// sibling under 1% of repo bytes and collapse a genuinely structured repo into
+// a lone building. Flooring on file share as well as byte share keeps a
+// directory with a real file count standing even when another dominates bytes.
+func TestDetectComponentsDominantFileKeepsSiblings(t *testing.T) {
+	kb := func(n int64) int64 { return n * 1024 }
+	files := []trackedFile{
+		// engine/: two small real files plus one 20 KB generated blob that
+		// dominates the repo's byte total.
+		{"engine/engine.go", 40}, {"engine/lifecycle.go", 40}, {"engine/generated.lock", kb(20)},
+		// Four sibling directories of genuine, small source code (>=3 files each).
+		{"server/a.go", 30}, {"server/b.go", 30}, {"server/c.go", 30},
+		{"cli/a.go", 30}, {"cli/b.go", 30}, {"cli/c.go", 30},
+		{"parser/a.go", 30}, {"parser/b.go", 30}, {"parser/c.go", 30},
+		{"store/a.go", 30}, {"store/b.go", 30}, {"store/c.go", 30},
+	}
+	got := map[string]bool{}
+	for _, c := range detectComponents(files) {
+		got[c.Name] = true
+	}
+	for _, want := range []string{"engine", "server", "cli", "parser", "store"} {
+		if !got[want] {
+			t.Errorf("component %q vanished: a dominant file suppressed a real sibling (got %v)", want, got)
+		}
+	}
+	if len(got) != 5 {
+		t.Fatalf("components = %v, want exactly the 5 real directories", got)
+	}
+}
+
 func TestScanEmitsComponentsWithOwnClocks(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "village")
 	initRepo(t, dir)
