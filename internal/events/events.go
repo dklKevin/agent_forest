@@ -30,6 +30,13 @@ const (
 	// with its size and the time it was last touched. Components become the
 	// buildings of a town's settlement.
 	KindComp Kind = "comp"
+	// KindFinish lays a town to rest as a monument, carrying the carved
+	// epitaph (possibly empty). Finishing is a human act, not a scan result,
+	// so it is rare; the log keeps every laying-to-rest ever performed.
+	KindFinish Kind = "finish"
+	// KindUnfinish lights the hearth again. The quiet reverse of a finish:
+	// the town returns to ordinary life, but nothing already carved is lost.
+	KindUnfinish Kind = "unfinish"
 )
 
 // Event is one record in the append-only log.
@@ -43,6 +50,7 @@ type Event struct {
 	Mix     map[string]float64 `json:"mix,omitempty"`
 	Bytes   int64              `json:"bytes,omitempty"`
 	Files   int                `json:"files,omitempty"`
+	Epitaph string             `json:"epitaph,omitempty"` // finish only: the carved words
 }
 
 // ComponentState is the derived state of one component: a major directory
@@ -67,6 +75,9 @@ type RepoState struct {
 	Tags         []string
 	Mix          map[string]float64
 	Components   map[string]*ComponentState // keyed by component path
+	Finished     bool                       // stands as a monument: the latest finish/unfinish wins
+	Epitaph      string                     // the last words ever carved; unfinishing never erases them
+	FinishTS     time.Time                  // when the latest finish was laid
 }
 
 // PrimaryLang returns the largest share of the language mix.
@@ -139,6 +150,14 @@ func Reduce(evs []Event) []*RepoState {
 			if e.TS.After(c.LastTS) {
 				c.LastTS = e.TS
 			}
+		case KindFinish:
+			r.Finished = true
+			r.FinishTS = e.TS
+			if e.Epitaph != "" {
+				r.Epitaph = e.Epitaph
+			}
+		case KindUnfinish:
+			r.Finished = false
 		}
 	}
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].FirstTS.Before(ordered[j].FirstTS) })

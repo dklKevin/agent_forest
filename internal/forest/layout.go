@@ -5,6 +5,7 @@
 package forest
 
 import (
+	"math"
 	"sort"
 	"time"
 
@@ -88,6 +89,10 @@ type Site struct {
 	BeltW     int // settlement belt edges: understory grows inside,
 	BeltE     int // old growth stays outside and behind
 	trees     []treeMeta
+	// The grove's planting inputs, kept so CarveGrove can replant it at any
+	// depth between its wild and monument layouts.
+	ts          uint64
+	front, back int
 }
 
 // Center is the site's focal x in reference dots.
@@ -118,6 +123,7 @@ func Build(seed uint64, towns []*model.Town) *World {
 		perTree := 13.0 + xnoise.Unit(ts, 1)*7
 
 		site := placeSettlement(ts, t, cursor, int(float64(front)*perTree*0.7)+30)
+		site.ts, site.front, site.back = ts, front, back
 
 		carve := site.yards()
 		if t.Finished {
@@ -387,6 +393,33 @@ func plantMonumentGrove(ts uint64, t *model.Town, x0, extent, front, back int, c
 		place(i, front, false)
 	}
 	return trees
+}
+
+// CarveGrove replants the site's grove partway between its wild layout (0)
+// and the calm monument layout (1) it keeps once finished. Both layouts plant
+// the same trees - same seeds, same rows, same species - so the grove stills
+// into symmetry rather than being replaced: each trunk eases toward the place
+// and height the monument grove holds for it. At 1 the trees land exactly
+// where Build would put them for a finished town, so a completed ceremony
+// needs no rebuild; at 0 they stand exactly as the wild grove grew.
+func (s *Site) CarveGrove(p float64) {
+	carve := s.yards()
+	extent := s.X1 - s.X0
+	if p <= 0 {
+		s.trees = plantWildGrove(s.ts, s.Town, s.X0, extent, s.front, s.back, carve)
+		return
+	}
+	mon := plantMonumentGrove(s.ts, s.Town, s.X0, extent, s.front, s.back, carve)
+	if p >= 1 {
+		s.trees = mon
+		return
+	}
+	wild := plantWildGrove(s.ts, s.Town, s.X0, extent, s.front, s.back, carve)
+	for i := range wild {
+		wild[i].x += int(math.Round(float64(mon[i].x-wild[i].x) * p))
+		wild[i].hMul += (mon[i].hMul - wild[i].hMul) * p
+	}
+	s.trees = wild
 }
 
 // plantWilderness fills margins and the gaps between towns with wild growth,

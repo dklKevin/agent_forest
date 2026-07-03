@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/dklKevin/agentforest/internal/app"
+	"github.com/dklKevin/agentforest/internal/events"
 	"github.com/dklKevin/agentforest/internal/model"
 )
 
@@ -29,12 +30,16 @@ func runCommand(cmd string, args []string) int {
 		return cmdSetExcluded(args, true)
 	case "include":
 		return cmdSetExcluded(args, false)
+	case "finish":
+		return cmdFinish(args)
+	case "unfinish":
+		return cmdUnfinish(args)
 	case "help":
 		usage()
 		return 0
 	default:
 		fmt.Printf("error: unknown command %q\n", cmd)
-		fmt.Println("help: commands are connect, towns, refresh, exclude, include")
+		fmt.Println("help: commands are connect, towns, refresh, exclude, include, finish, unfinish")
 		return 2
 	}
 }
@@ -92,6 +97,33 @@ usage:
 
 examples:
   agentforest include old-experiment
+`)
+	case "finish":
+		fmt.Print(`finish: lay a town to rest as a monument, with an optional carved epitaph
+
+usage:
+  agentforest finish <name|path> ["a word to carve"]
+
+The epitaph is one short line (40 characters at most), shown only when the
+town is inspected; the map stays numberless and the monument just stands.
+Finishing an already-finished town with a new epitaph re-carves it; the log
+keeps every word ever carved.
+
+examples:
+  agentforest finish sidecar
+  agentforest finish sidecar "shipped the thing. slept better."
+`)
+	case "unfinish":
+		fmt.Print(`unfinish: light the hearth again (the quiet reverse of finish)
+
+usage:
+  agentforest unfinish <name|path>
+
+The town returns to ordinary life and decay. Its carved words are kept, and
+they return with it if it is ever finished again.
+
+examples:
+  agentforest unfinish sidecar
 `)
 	default:
 		usage()
@@ -218,6 +250,95 @@ func cmdSetExcluded(args []string, excluded bool) int {
 	} else {
 		fmt.Println("included: " + key)
 	}
+	return 0
+}
+
+// findFinishState resolves a town and reports whether it currently stands
+// finished, from the same derived state the forest renders.
+func findFinishState(a *app.App, nameOrPath string) (key string, finished bool, err error) {
+	key, err = a.FindTown(nameOrPath)
+	if err != nil {
+		return "", false, err
+	}
+	for _, r := range events.Reduce(a.Events) {
+		if r.Path == key {
+			return key, r.Finished, nil
+		}
+	}
+	return key, false, nil
+}
+
+func cmdFinish(args []string) int {
+	if len(args) < 1 || len(args) > 2 {
+		fmt.Println("error: finish needs a town and, at most, one carved line")
+		fmt.Println(`help: agentforest finish <name|path> ["a word to carve"]`)
+		return 2
+	}
+	epitaph := ""
+	if len(args) == 2 {
+		epitaph = strings.TrimSpace(args[1])
+	}
+	if err := app.ValidateEpitaph(epitaph); err != nil {
+		fmt.Println("error: " + err.Error())
+		fmt.Printf("help: an epitaph is one plain line of at most %d characters\n", app.EpitaphMaxRunes)
+		return 2
+	}
+	a, err := app.Load()
+	if err != nil {
+		return internalError(err)
+	}
+	key, finished, err := findFinishState(a, args[0])
+	if err != nil {
+		fmt.Println("error: " + err.Error())
+		fmt.Println("help: Run `agentforest towns` to see every town")
+		return 1
+	}
+	if finished && epitaph == "" {
+		fmt.Printf("finished: %s already stands as a monument (no-op)\n", key)
+		fmt.Println("help[1]:")
+		fmt.Printf("  Run `agentforest finish %s \"a word to carve\"` to re-carve its epitaph\n", args[0])
+		return 0
+	}
+	if err := a.Finish(key, epitaph, time.Now()); err != nil {
+		return internalError(err)
+	}
+	if finished {
+		fmt.Printf("carved: %q · %s stands as a monument\n", epitaph, key)
+	} else {
+		fmt.Println("finished: " + key + " stands as a monument")
+		if epitaph != "" {
+			fmt.Printf("epitaph: %q (shown when the town is inspected)\n", epitaph)
+		}
+	}
+	fmt.Println("help[1]:")
+	fmt.Printf("  Run `agentforest unfinish %s` to light the hearth again\n", args[0])
+	return 0
+}
+
+func cmdUnfinish(args []string) int {
+	if len(args) != 1 {
+		fmt.Println("error: unfinish needs exactly one town name or path")
+		fmt.Println("help: agentforest unfinish <name|path>")
+		return 2
+	}
+	a, err := app.Load()
+	if err != nil {
+		return internalError(err)
+	}
+	key, finished, err := findFinishState(a, args[0])
+	if err != nil {
+		fmt.Println("error: " + err.Error())
+		fmt.Println("help: Run `agentforest towns` to see every town")
+		return 1
+	}
+	if !finished {
+		fmt.Printf("unfinished: %s was not a monument (no-op)\n", key)
+		return 0
+	}
+	if err := a.Unfinish(key, time.Now()); err != nil {
+		return internalError(err)
+	}
+	fmt.Println("unfinished: " + key + " · the hearth is lit again (its carved words are kept)")
 	return 0
 }
 

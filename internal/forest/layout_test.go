@@ -130,6 +130,57 @@ func TestSettlementDeterministic(t *testing.T) {
 	}
 }
 
+// The ceremony's grove easing must land exactly where Build would put the
+// trees: CarveGrove(1) on a living town equals the monument grove a finished
+// build plants, and CarveGrove(0) restores the wild grove untouched. Anything
+// less and the final ceremony frame would differ from the world's own art.
+func TestCarveGroveLandsOnBuiltLayouts(t *testing.T) {
+	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	wild := Build(5, testTowns(now))
+	finishedTowns := testTowns(now)
+	for _, tn := range finishedTowns {
+		tn.Finished = true
+	}
+	monument := Build(5, finishedTowns)
+
+	for i, s := range wild.Sites {
+		if s.Town.Finished {
+			continue // oldmill is built finished; the wild side has no meaning
+		}
+		before := append([]treeMeta{}, s.trees...)
+		s.CarveGrove(1)
+		want := monument.Sites[i].trees
+		if len(s.trees) != len(want) {
+			t.Fatalf("%s: carve changed the tree count: %d vs %d", s.Town.Name, len(s.trees), len(want))
+		}
+		for j := range s.trees {
+			if s.trees[j] != want[j] {
+				t.Errorf("%s tree %d: carve(1) %+v, built monument %+v", s.Town.Name, j, s.trees[j], want[j])
+			}
+		}
+		s.CarveGrove(0)
+		for j := range s.trees {
+			if s.trees[j] != before[j] {
+				t.Errorf("%s tree %d: carve(0) did not restore the wild grove", s.Town.Name, j)
+			}
+		}
+		// Midway the trunks stand between their two homes, same identities.
+		s.CarveGrove(0.5)
+		for j := range s.trees {
+			if s.trees[j].seed != before[j].seed || s.trees[j].back != before[j].back {
+				t.Errorf("%s tree %d: carve changed a tree's identity", s.Town.Name, j)
+			}
+			lo, hi := before[j].x, want[j].x
+			if lo > hi {
+				lo, hi = hi, lo
+			}
+			if s.trees[j].x < lo || s.trees[j].x > hi {
+				t.Errorf("%s tree %d: carve(0.5) x=%d outside %d..%d", s.Town.Name, j, s.trees[j].x, lo, hi)
+			}
+		}
+	}
+}
+
 // Tiers follow commit volume: hut, cabin, homestead, a decade sooner.
 func TestHearthTiers(t *testing.T) {
 	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)

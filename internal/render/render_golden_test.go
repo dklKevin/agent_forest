@@ -109,6 +109,19 @@ func TestFinishedMonumentGolden(t *testing.T) {
 	renderFixture(t, "finished_monument", w, "harborfold")
 }
 
+// TestFinishCeremonyMidGolden pins one frame from the middle of the
+// laying-to-rest passage: the board half stone, the last plume thinning, the
+// finial risen, the grove partway into its monument symmetry. It locks the
+// carve choreography so the ceremony cannot silently drift into a snap.
+func TestFinishCeremonyMidGolden(t *testing.T) {
+	town := settlementTown("harborfold", false, fixedNow)
+	w := forest.Build(lcSeed, []*model.Town{town})
+	carve := 0.55
+	town.CarveOverride = &carve
+	w.Sites[0].CarveGrove(carve)
+	renderFixture(t, "finish_ceremony_mid", w, "harborfold")
+}
+
 // TestSingleTownGolden pins the lone first town - a young tended hut in an
 // otherwise empty wood. The frame worth locking before that first-forest
 // moment is ever redesigned.

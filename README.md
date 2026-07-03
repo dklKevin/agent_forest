@@ -37,7 +37,7 @@ The inspect panel names each building's component and stage; the forest itself s
 - **The honesty layer.**
   A town you have stopped tending is slowly, beautifully reclaimed by the forest.
   A commit revives it.
-  Marking it finished freezes it as a monument.
+  Laying it to rest turns it into a monument, with a short epitaph carved if you leave one.
   A long-dead town decays to ruins, but it never disappears.
 - **Numberless by default.**
   Stats exist, but only when you deliberately inspect a town.
@@ -62,7 +62,8 @@ No daemon runs and nothing is watched when the app is closed; the next launch si
 - `← →` or `h l` wander the forest; hold shift to stride.
 - `tab` / `n` and `shift+tab` / `p` walk town to town; `g` oldest, `G` newest.
 - `enter` or `i` inspect the focused town; numbers live here only.
-- `f` mark a town finished; it freezes as a monument.
+- `f` lay a town to rest as a monument: a short ceremony plays, and you may carve one short line, up to 40 characters (shown only in inspect).
+  On a monument, `f` quietly lights the hearth again; the carved words are kept.
 - `d` open the groundskeeper's almanac and preview years of neglect in seconds.
 - In the almanac, `+` / `-` shift by day, `<` / `>` by month, `[` / `]` by year, `1`-`6` jump to stages, and `0` restores real time.
 - `c` connect another root; `x` exclude the focused town; `r` rescan every root.
@@ -78,9 +79,12 @@ agentforest towns                list every visible town
 agentforest refresh              rescan all connected roots
 agentforest exclude <name|path>  hide a town (history kept)
 agentforest include <name|path>  restore a hidden town
+agentforest finish <name|path> ["a word to carve"]   lay a town to rest as a monument
+agentforest unfinish <name|path> light the hearth again (carved words are kept)
 ```
 
 Use a full path when duplicate town names collide.
+An epitaph is optional, trimmed to one plain line of at most 40 characters; finishing a monument with new words re-carves it.
 Output is structured, and command-specific errors include help when there is an obvious next step.
 Every command answers `--help`.
 
@@ -88,7 +92,7 @@ Every command answers `--help`.
 
 By default, everything sits in `~/.config/agentforest`; `$XDG_CONFIG_HOME` moves it to `$XDG_CONFIG_HOME/agentforest`, and `$AGENTFOREST_HOME` overrides both.
 The storage is plain files you can read:
-`settings.json` holds your roots, excludes, and finished towns; `events.jsonl` is the append-only history the forest grows from.
+`settings.json` holds your roots and excludes, plus legacy finished entries from older builds; `events.jsonl` is the append-only history the forest grows from, including every finish, unfinish, and carved word.
 Repositories that vanish from disk keep their towns; ruins never disappear.
 
 ## Snapshots and reference sheets

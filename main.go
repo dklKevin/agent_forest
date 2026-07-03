@@ -32,6 +32,7 @@ usage:
   agentforest towns           list every town
   agentforest refresh         rescan all connected roots
   agentforest exclude <name>  hide a town (history kept); include restores it
+  agentforest finish <name> ["word"]   lay a town to rest as a monument; unfinish reverses it
   agentforest --snapshot      print one frame and exit (for scripts and screenshots)
   agentforest --gallery x     print a reference sheet: species | decay | homestead | settlement
 

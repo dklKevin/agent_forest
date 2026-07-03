@@ -2,7 +2,7 @@
 // choices, and the append-only event log. Everything is a plain file a human
 // can open, read, and hand-edit.
 //
-//	settings.json  - connected roots, excluded repos, finished repos
+//	settings.json  - connected roots, excluded repos, legacy finished repos
 //	events.jsonl   - append-only event log, one JSON event per line
 //
 // The event log is the source of truth for world history: repos that vanish
@@ -44,11 +44,15 @@ func Dir() (string, error) {
 	return filepath.Join(home, ".config", "agentforest"), nil
 }
 
-// Settings is everything the user has chosen: which roots to scan, which
-// repos to hide, which towns stand finished. Repos are keyed by their
-// canonical absolute path, so renames read as new towns but moves of the
-// whole root do not silently duplicate anything a human could not fix by
-// editing this file.
+// Settings is everything the user has chosen: which roots to scan and which
+// repos to hide. Repos are keyed by their canonical absolute path, so renames
+// read as new towns but moves of the whole root do not silently duplicate
+// anything a human could not fix by editing this file.
+//
+// Finished is legacy: finish state (and the carved epitaph) now lives in the
+// event log as finish/unfinish events. The list is still read so old forests
+// keep their monuments - app.Load synthesizes finish events from it - and it
+// is left in place for older builds, but nothing new is written to it.
 type Settings struct {
 	Roots    []string `json:"roots"`
 	Excludes []string `json:"excludes,omitempty"`
@@ -99,10 +103,11 @@ func (s *Settings) SetExcluded(path string, excluded bool) bool {
 	return removeFrom(&s.Excludes, path)
 }
 
-// IsFinished reports whether a repo stands as a monument.
+// IsFinished reports whether the legacy list marks a repo finished.
 func (s *Settings) IsFinished(path string) bool { return contains(s.Finished, path) }
 
-// SetFinished freezes or unfreezes a repo. Reports whether anything changed.
+// SetFinished edits the legacy finished list. It exists so unfinishing can
+// retire a legacy entry; new finish state goes to the event log instead.
 func (s *Settings) SetFinished(path string, finished bool) bool {
 	if finished {
 		return addTo(&s.Finished, path)

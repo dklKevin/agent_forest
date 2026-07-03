@@ -13,15 +13,15 @@ import (
 
 // Cabin is one town's homestead, fully described so drawing is deterministic.
 type Cabin struct {
-	Seed     uint64
-	X        int // center, dots
-	GroundY  int // baseline, dots
-	Tier     int // 0 hut, 1 cabin, 2 homestead
-	Lvl      uint8
-	Decay    float64 // 0 lived-in .. ~1 chimney and sills
-	Finished bool    // a kept homestead: shuttered, stocked, still
-	Bare     bool    // an outbuilding dwelling: cold chimney, no dooryard
-	Focused  bool
+	Seed    uint64
+	X       int // center, dots
+	GroundY int // baseline, dots
+	Tier    int // 0 hut, 1 cabin, 2 homestead
+	Lvl     uint8
+	Decay   float64 // 0 lived-in .. ~1 chimney and sills
+	Carve   float64 // 0 lived-in .. 1 a kept homestead: shuttered, stocked, still
+	Bare    bool    // an outbuilding dwelling: cold chimney, no dooryard
+	Focused bool
 }
 
 // CabinDims returns wall width in cells (odd), wall height in cell rows, and
@@ -124,11 +124,15 @@ func (p *P) DrawCabin(cb Cabin) {
 	p.vines(xnoise.Hash(cb.Seed, 0xC1), cb.X-wallW-2, cb.GroundY, wallH*4+8, lvl-40, d)
 	p.vines(xnoise.Hash(cb.Seed, 0xC2), cb.X+wallW+2, cb.GroundY, wallH*4+8, lvl-40, d)
 
-	if cb.Finished {
-		// A kept homestead: the carved finial at the peak, cairns by the path.
-		p.C.Rune(cx, ridgeRow-1, '◆', lvl+25)
-		p.cairn(xnoise.Hash(cb.Seed, 0xC3), cb.X-wallW-8, cb.GroundY, lvl-12)
-		p.cairn(xnoise.Hash(cb.Seed, 0xC4), cb.X+wallW+8, cb.GroundY, lvl-12)
+	if cb.Carve > 0 {
+		// A kept homestead: the carved finial rises at the peak, catching the
+		// warm light; the cairns stack by the path, course by course.
+		if rise := xnoise.Smoothstep(carveFinial, carveNameRow, cb.Carve); rise > 0 {
+			p.C.Rune(cx, ridgeRow-1, '◆', uint8(int(lvl)-15+int(40*rise)))
+		}
+		rows := cairnRows(cb.Carve)
+		p.cairn(xnoise.Hash(cb.Seed, 0xC3), cb.X-wallW-8, cb.GroundY, lvl-12, rows)
+		p.cairn(xnoise.Hash(cb.Seed, 0xC4), cb.X+wallW+8, cb.GroundY, lvl-12, rows)
 	}
 }
 
@@ -267,7 +271,7 @@ func (p *P) cabinDoor(cb Cabin, lvl uint8, d float64, cx, gyr, hw, side int) {
 // homestead is shuttered instead.
 func (p *P) cabinWindows(cb Cabin, lvl uint8, d, weather float64, cx, gyr, hw, side int) {
 	draw := func(wc int, idx uint64) {
-		if cb.Finished {
+		if cb.Carve >= carveShutter {
 			p.C.Rune(wc, gyr-1, '▤', lvl-2)
 			return
 		}
@@ -307,10 +311,15 @@ func (p *P) cabinChimney(cb Cabin, lvl uint8, cx, roofY0 int, rise, span float64
 			}
 		}
 	}
-	if cb.Finished || cb.Bare {
+	if cb.Carve >= 1 || cb.Bare {
 		return // a kept or outbuilding hearth is cold
 	}
 	fresh := 1 - xnoise.Smoothstep(0.008, 0.085, cb.Decay)
+	if cb.Carve > 0 {
+		// The ceremony: one last full plume, however quiet the hearth had
+		// grown, thinning to nothing as the stone spreads down the board.
+		fresh = 1 - xnoise.Smoothstep(carvePlume0, carvePlume1, cb.Carve)
+	}
 	if fresh <= 0.02 {
 		return
 	}
@@ -350,7 +359,7 @@ func (p *P) cabinWoodstore(cb Cabin, lvl uint8, d float64, wallW, side int) {
 	_, wallH, _ := CabinDims(cb.Tier)
 	eaveY := (cb.GroundY/4-wallH+1)*4 + 2
 
-	if cb.Tier >= 1 && (d < 0.5 || cb.Finished) {
+	if cb.Tier >= 1 && (d < 0.5 || cb.Carve >= carveCord) {
 		// The lean-to roof, one plank thick, and its corner post.
 		steps := 11
 		for i := 0; i <= steps; i++ {
@@ -383,7 +392,7 @@ func (p *P) cabinWoodstore(cb Cabin, lvl uint8, d float64, wallW, side int) {
 		total += r[0]
 	}
 	remaining := total
-	if !cb.Finished {
+	if cb.Carve < carveCord {
 		remaining = int(math.Ceil(float64(total) * (1 - xnoise.Smoothstep(0.04, 0.52, d))))
 	}
 	drawn := 0
@@ -427,7 +436,7 @@ func (p *P) cabinStump(cb Cabin, lvl uint8, d float64, gyr, wallW, side int) {
 	p.C.Rune(sx/2, gyr, '▂', lvl-26)
 	p.C.Dot(sx-1, cb.GroundY-4, lvl-38)
 	p.C.Dot(sx+1, cb.GroundY-5, lvl-40)
-	if cb.Finished {
+	if cb.Carve >= carveCord {
 		return // the axe is hung up; the work is done
 	}
 	switch {

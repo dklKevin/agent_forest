@@ -164,7 +164,10 @@ func IdleForDecay(d float64) time.Duration {
 // Town is one repository as a place in the forest.
 type Town struct {
 	*events.RepoState
-	Species  Species
+	Species Species
+	// Finished is the town's display state, seeded from the derived repo
+	// state (or the demo cast) at build. The UI flips it in place when a
+	// ceremony completes so the world need not be rebuilt mid-moment.
 	Finished bool
 	// IdleOverride, when set, replaces the real idle time. It exists for the
 	// almanac so stages can be previewed without waiting real days.
@@ -173,11 +176,26 @@ type Town struct {
 	// It exists for the revive animation, so a freshly touched building can
 	// ease back to life instead of snapping.
 	CompIdleOverride map[string]time.Duration
+	// CarveOverride, when set, drives the laying-to-rest ceremony: the
+	// monument dressing shown at a partial depth while the transition plays.
+	CarveOverride *float64
 }
 
 // NewTown derives a town from repo state.
 func NewTown(r *events.RepoState, finished bool) *Town {
 	return &Town{RepoState: r, Species: SpeciesFor(r.PrimaryLang()), Finished: finished}
+}
+
+// Carve is how far along the wood-to-stone transition the town stands:
+// 0 living, 1 the full monument, between only while the ceremony plays.
+func (t *Town) Carve() float64 {
+	if t.CarveOverride != nil {
+		return xnoise.Clamp(*t.CarveOverride, 0, 1)
+	}
+	if t.Finished {
+		return 1
+	}
+	return 0
 }
 
 // Idle returns the effective idle duration at now.

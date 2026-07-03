@@ -42,6 +42,67 @@ func TestReduceDerivesRepoState(t *testing.T) {
 	}
 }
 
+func TestReduceFinishFold(t *testing.T) {
+	base := time.Date(2022, 1, 1, 0, 0, 0, 0, time.UTC)
+	at := func(days int) time.Time { return base.AddDate(0, 0, days) }
+	repo := []Event{
+		{Kind: KindRepo, Repo: "/x/a", TS: base, Path: "/x/a", Name: "a"},
+		{Kind: KindActivity, Repo: "/x/a", TS: base, Commits: 3},
+	}
+	reduceOne := func(extra ...Event) *RepoState {
+		t.Helper()
+		repos := Reduce(append(append([]Event{}, repo...), extra...))
+		if len(repos) != 1 {
+			t.Fatalf("got %d repos, want 1", len(repos))
+		}
+		return repos[0]
+	}
+
+	// Untouched: not finished, nothing carved.
+	r := reduceOne()
+	if r.Finished || r.Epitaph != "" || !r.FinishTS.IsZero() {
+		t.Fatalf("clean repo carries finish state: %+v", r)
+	}
+
+	// A finish carries its epitaph and its moment.
+	r = reduceOne(Event{Kind: KindFinish, Repo: "/x/a", TS: at(10), Epitaph: "done well"})
+	if !r.Finished || r.Epitaph != "done well" || !r.FinishTS.Equal(at(10)) {
+		t.Fatalf("finish fold wrong: %+v", r)
+	}
+
+	// Unfinish reverses the standing but never erases the words.
+	r = reduceOne(
+		Event{Kind: KindFinish, Repo: "/x/a", TS: at(10), Epitaph: "done well"},
+		Event{Kind: KindUnfinish, Repo: "/x/a", TS: at(20)},
+	)
+	if r.Finished {
+		t.Fatal("unfinish did not reverse")
+	}
+	if r.Epitaph != "done well" {
+		t.Fatalf("unfinish erased the epitaph: %q", r.Epitaph)
+	}
+
+	// Re-finishing unmarked keeps the old words; the log lost nothing.
+	r = reduceOne(
+		Event{Kind: KindFinish, Repo: "/x/a", TS: at(10), Epitaph: "done well"},
+		Event{Kind: KindUnfinish, Repo: "/x/a", TS: at(20)},
+		Event{Kind: KindFinish, Repo: "/x/a", TS: at(30)},
+	)
+	if !r.Finished || r.Epitaph != "done well" || !r.FinishTS.Equal(at(30)) {
+		t.Fatalf("unmarked re-finish fold wrong: %+v", r)
+	}
+
+	// Re-carving: the last epitaph wins for display.
+	r = reduceOne(
+		Event{Kind: KindFinish, Repo: "/x/a", TS: at(10), Epitaph: "done well"},
+		Event{Kind: KindUnfinish, Repo: "/x/a", TS: at(20)},
+		Event{Kind: KindFinish, Repo: "/x/a", TS: at(30), Epitaph: "done better"},
+	)
+	if !r.Finished || r.Epitaph != "done better" {
+		t.Fatalf("last epitaph did not win: %+v", r)
+	}
+}
+
 func TestReducePrefersExplicitName(t *testing.T) {
 	ts := time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC)
 	repos := Reduce([]Event{

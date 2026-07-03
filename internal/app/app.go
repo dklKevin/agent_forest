@@ -8,8 +8,11 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/dklKevin/agentforest/internal/events"
 	"github.com/dklKevin/agentforest/internal/gitscan"
@@ -40,7 +43,39 @@ func Load() (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	evs = synthesizeLegacyFinishes(evs, s.Finished)
 	return &App{Dir: dir, Settings: s, HasSettings: found, Events: evs, Skipped: skipped}, nil
+}
+
+// synthesizeLegacyFinishes folds settings.json's old finished list into the
+// event stream. Finish state once lived in settings; it now lives in the log,
+// so any legacy path the log holds no finish or unfinish record for gets a
+// synthesized finish event stamped at that repo's last activity. In-memory
+// only: the log is never rewritten, and the settings list is left in place so
+// older builds keep reading it.
+func synthesizeLegacyFinishes(evs []events.Event, finished []string) []events.Event {
+	if len(finished) == 0 {
+		return evs
+	}
+	known := map[string]bool{}
+	settled := map[string]bool{} // repos the log already decides
+	last := map[string]time.Time{}
+	for _, e := range evs {
+		known[e.Repo] = true
+		if e.Kind == events.KindFinish || e.Kind == events.KindUnfinish {
+			settled[e.Repo] = true
+		}
+		if e.TS.After(last[e.Repo]) {
+			last[e.Repo] = e.TS
+		}
+	}
+	for _, path := range finished {
+		if !known[path] || settled[path] {
+			continue
+		}
+		evs = append(evs, events.Event{Kind: events.KindFinish, Repo: path, TS: last[path]})
+	}
+	return evs
 }
 
 // Connected reports whether any real forest exists yet: a root to scan or
@@ -51,7 +86,8 @@ func (a *App) Connected() bool {
 
 // Towns folds the event log into towns, oldest first. Excluded repos are
 // filtered here at build time; their history stays in the log so restoring
-// them later costs nothing. Finished flags come from settings.
+// them later costs nothing. Finish state and epitaphs are derived state,
+// folded from the log's finish/unfinish events.
 func (a *App) Towns() []*model.Town {
 	repos := events.Reduce(a.Events)
 	towns := make([]*model.Town, 0, len(repos))
@@ -59,9 +95,60 @@ func (a *App) Towns() []*model.Town {
 		if r.Path != "" && a.Settings.IsExcluded(r.Path) {
 			continue
 		}
-		towns = append(towns, model.NewTown(r, a.Settings.IsFinished(r.Path)))
+		towns = append(towns, model.NewTown(r, r.Finished))
 	}
 	return towns
+}
+
+// EpitaphMaxRunes is the carving limit. An epitaph is carved, not written:
+// one short line, never prose.
+const EpitaphMaxRunes = 40
+
+// ValidateEpitaph reports why a string cannot be carved: too long, or not a
+// single plain line. Empty is fine; a monument may stand unmarked.
+func ValidateEpitaph(s string) error {
+	if utf8.RuneCountInString(s) > EpitaphMaxRunes {
+		return fmt.Errorf("an epitaph is carved, not written: at most %d characters", EpitaphMaxRunes)
+	}
+	for _, r := range s {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("an epitaph is one plain line")
+		}
+	}
+	return nil
+}
+
+// Finish lays a repo to rest as a monument, carving the epitaph (possibly
+// empty). It appends a finish event to the log - the log is the truth; the
+// legacy settings list is not touched. Re-finishing appends again: the log
+// keeps every laying-to-rest, and the newest non-empty words win for display.
+func (a *App) Finish(path, epitaph string, now time.Time) error {
+	epitaph = strings.TrimSpace(epitaph)
+	if err := ValidateEpitaph(epitaph); err != nil {
+		return err
+	}
+	ev := events.Event{Kind: events.KindFinish, Repo: path, TS: now, Epitaph: epitaph}
+	if err := store.AppendEvents(a.Dir, []events.Event{ev}); err != nil {
+		return err
+	}
+	a.Events = append(a.Events, ev)
+	return nil
+}
+
+// Unfinish lights the hearth again: the quiet reverse of Finish. The carved
+// words stay in the log untouched. Any legacy settings entry for the path is
+// dropped in memory and saved best-effort; once the reverse event is appended,
+// the log remains the source of truth.
+func (a *App) Unfinish(path string, now time.Time) error {
+	ev := events.Event{Kind: events.KindUnfinish, Repo: path, TS: now}
+	if err := store.AppendEvents(a.Dir, []events.Event{ev}); err != nil {
+		return err
+	}
+	a.Events = append(a.Events, ev)
+	if a.Settings.SetFinished(path, false) {
+		_ = store.SaveSettings(a.Dir, a.Settings)
+	}
+	return nil
 }
 
 // FindTown resolves a name or path to the repo key used in settings and the
