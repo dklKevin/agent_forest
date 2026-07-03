@@ -134,19 +134,39 @@ func main() {
 		return
 	}
 
+	// The since-last-visit pulse's clock. The previous stamp feeds the pulse;
+	// this opening is stamped immediately at launch - not only at exit - so a
+	// quick relaunch (or a crash) never replays the pulse just shown. A clean
+	// exit re-stamps below so changes watched live during a long session are
+	// not re-pulsed next time. Only the interactive real forest stamps:
+	// snapshots, subcommands, and the demo never touch it.
+	var lastOpened time.Time
+	if !demoMode {
+		lastOpened = a.Settings.LastOpened
+		_ = a.TouchLastOpened(now) // decorative state: never blocks the forest
+	}
+
 	m := ui.New(ui.Config{
-		App:     a,
-		World:   world,
-		Seed:    *seed,
-		Demo:    demoMode,
-		Onboard: !*demoFlag && !a.Connected(),
-		Events:  demoEvents,
+		App:        a,
+		World:      world,
+		Seed:       *seed,
+		Demo:       demoMode,
+		Onboard:    !*demoFlag && !a.Connected(),
+		LastOpened: lastOpened,
+		Events:     demoEvents,
 	})
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Println("error: " + err.Error())
 		os.Exit(1)
 	}
+	if shouldStampLastOpenedOnExit(*demoFlag, a) {
+		_ = a.TouchLastOpened(time.Now())
+	}
+}
+
+func shouldStampLastOpenedOnExit(demoFlag bool, a *app.App) bool {
+	return !demoFlag && a != nil && a.Connected()
 }
 
 func printSnapshot(w *forest.World, cw, ch int, at string, t float64, now time.Time, prof canvas.Profile) {

@@ -54,6 +54,7 @@ Roots are scanned recursively, skipping hidden folders, `node_modules`, and repo
 Every repository with commits becomes a town, and empty repositories stay quiet until their first commit.
 While the app is open, a new commit in any connected repository revives its town within seconds.
 No daemon runs and nothing is watched when the app is closed; the next launch simply catches up.
+On a later real launch, towns with commits that landed while you were away may briefly stir with the same revival motion, capped to a handful of notable towns; first runs and upgrades from older settings stay quiet.
 
 `agentforest --demo` opens the demo forest of twelve invented repositories any time.
 
@@ -94,7 +95,7 @@ Every command answers `--help`.
 
 By default, everything sits in `~/.config/agentforest`; `$XDG_CONFIG_HOME` moves it to `$XDG_CONFIG_HOME/agentforest`, and `$AGENTFOREST_HOME` overrides both.
 The storage is plain files you can read:
-`settings.json` holds your roots and excludes, plus legacy finished entries from older builds; `events.jsonl` is the append-only history the forest grows from, including every finish, unfinish, and carved word.
+`settings.json` holds your roots, excludes, and last-opened stamp, plus legacy finished entries from older builds; `events.jsonl` is the append-only history the forest grows from, including every finish, unfinish, and carved word.
 Repositories that vanish from disk keep their towns; ruins never disappear.
 
 ## Snapshots and reference sheets

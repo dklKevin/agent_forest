@@ -2,7 +2,7 @@
 // choices, and the append-only event log. Everything is a plain file a human
 // can open, read, and hand-edit.
 //
-//	settings.json  - connected roots, excluded repos, legacy finished repos
+//	settings.json  - connected roots, excluded repos, last-opened stamp, legacy finished repos
 //	events.jsonl   - append-only event log, one JSON event per line
 //
 // The event log is the source of truth for world history: repos that vanish
@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"github.com/dklKevin/agentforest/internal/events"
 )
@@ -57,6 +58,11 @@ type Settings struct {
 	Roots    []string `json:"roots"`
 	Excludes []string `json:"excludes,omitempty"`
 	Finished []string `json:"finished,omitempty"`
+	// LastOpened is when the forest was last open interactively. It feeds the
+	// since-last-visit pulse: towns that stirred after this instant wake as
+	// the forest opens. Zero (or absent, in a settings.json from before the
+	// field existed) means never: a first run shows no pulse.
+	LastOpened time.Time `json:"lastOpened,omitzero"`
 }
 
 // LoadSettings reads settings.json. A missing file returns empty settings
