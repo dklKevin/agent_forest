@@ -1,0 +1,21 @@
+# AgentForest is a strictly local, offline keepsake, so CI is deliberately
+# minimal: build, vet, and the full test suite (which includes the golden
+# render/art net). No external services, no artifacts, no network.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...

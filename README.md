@@ -109,6 +109,20 @@ If `--at` is wrong, the error lists valid town names.
 Galleries accept `--width`, `--height`, and `--plain`.
 `--version` prints the binary version.
 
+## Development
+
+Use Go 1.26.x. The local gate is the same one CI runs:
+
+```
+make build
+make vet
+make test
+```
+
+Those wrap `go build ./...`, `go vet ./...`, and `go test ./...`.
+The render/art layer is protected by plain UTF-8 golden frames under `internal/gallery/testdata` and `internal/render/testdata`.
+After an intentional art change, run `make golden` (or `go test ./internal/gallery ./internal/render -update`) and review the regenerated `.golden` diff as the art review.
+
 ## Privacy
 
 Everything stays on your machine.
