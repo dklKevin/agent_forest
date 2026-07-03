@@ -151,7 +151,7 @@ func StageOf(d float64) Stage {
 }
 
 // IdleForDecay inverts DecayAt: the idle duration that produces depth d.
-// Used by the almanac's stage jumps.
+// Used by the neglect preview's stage jumps.
 func IdleForDecay(d float64) time.Duration {
 	d = xnoise.Clamp(d, 0, decayCap)
 	if d <= 0 {
@@ -170,7 +170,7 @@ type Town struct {
 	// ceremony completes so the world need not be rebuilt mid-moment.
 	Finished bool
 	// IdleOverride, when set, replaces the real idle time. It exists for the
-	// almanac so stages can be previewed without waiting real days.
+	// neglect preview so stages can be seen without waiting real days.
 	IdleOverride *time.Duration
 	// CompIdleOverride overrides one building's idle time by component path.
 	// It exists for the revive animation, so a freshly touched building can
@@ -357,8 +357,8 @@ func (t *Town) Buildings() []Building {
 	return bs
 }
 
-// BuildingIdle is one building's effective idle time. The almanac's town
-// override slides every building forward while preserving each one's own
+// BuildingIdle is one building's effective idle time. The neglect preview's
+// town override slides every building forward while preserving each one's own
 // offset, so a preview of neglect keeps the village's internal structure.
 func (t *Town) BuildingIdle(b Building, now time.Time) time.Duration {
 	if d, ok := t.CompIdleOverride[b.Path]; ok {

@@ -65,7 +65,7 @@ func TestBuildingsCeiling(t *testing.T) {
 	}
 }
 
-// Each building decays on its own component's clock; the almanac's town
+// Each building decays on its own component's clock; the neglect preview's
 // override slides everything forward preserving each building's offset.
 func TestBuildingDecayClocks(t *testing.T) {
 	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
@@ -86,7 +86,7 @@ func TestBuildingDecayClocks(t *testing.T) {
 	if dd < 0.9 {
 		t.Errorf("400-day docs decay = %v, want deep", dd)
 	}
-	// Almanac preview: slide the town two years out.
+	// Neglect preview: slide the town two years out.
 	ov := 2 * 365 * 24 * time.Hour
 	town.IdleOverride = &ov
 	de := town.BuildingIdle(engine, now)

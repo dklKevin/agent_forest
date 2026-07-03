@@ -31,10 +31,9 @@ const (
 // reference instant.
 func demoWorld(seed uint64, now time.Time) *forest.World {
 	repos := events.Reduce(demo.Events(seed, now))
-	finished := demo.FinishedNames()
 	var towns []*model.Town
 	for _, r := range repos {
-		towns = append(towns, model.NewTown(r, finished[r.Name]))
+		towns = append(towns, model.NewTown(r, r.Finished))
 	}
 	return forest.Build(seed, towns)
 }

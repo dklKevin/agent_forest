@@ -109,6 +109,9 @@ func Events(seed uint64, now time.Time) []events.Event {
 				Name: "v" + itoa(1+k/3) + "." + itoa(k%3) + ".0",
 			})
 		}
+		if s.finished {
+			evs = append(evs, events.Event{Kind: events.KindFinish, Repo: s.name, TS: last})
+		}
 	}
 	return evs
 }

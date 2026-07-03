@@ -62,10 +62,11 @@ No daemon runs and nothing is watched when the app is closed; the next launch si
 - `← →` or `h l` wander the forest; hold shift to stride.
 - `tab` / `n` and `shift+tab` / `p` walk town to town; `g` oldest, `G` newest.
 - `enter` or `i` inspect the focused town; numbers live here only.
-- `f` lay a town to rest as a monument: a short ceremony plays, and you may carve one short line, up to 40 characters (shown only in inspect).
+- `a` while inspecting opens the town's almanac: its memoir, folded from its history - planted, long quiets and wakings, releases staked, and, leading a finished town's page, its carved words.
+- `f` lay a town to rest as a monument: a short ceremony plays, and you may carve one short line, up to 40 characters (read back in inspect and the almanac, never on the map).
   On a monument, `f` quietly lights the hearth again; the carved words are kept.
-- `d` open the groundskeeper's almanac and preview years of neglect in seconds.
-- In the almanac, `+` / `-` shift by day, `<` / `>` by month, `[` / `]` by year, `1`-`6` jump to stages, and `0` restores real time.
+- `d` preview years of neglect in seconds.
+- In the preview, `+` / `-` shift by day, `<` / `>` by month, `[` / `]` by year, `1`-`6` jump to stages, and `0` restores real time.
 - `c` connect another root; `x` exclude the focused town; `r` rescan every root.
 - `?` help, `esc` dismisses overlays, `q` quits from the forest.
 
@@ -76,6 +77,7 @@ The same forest can be tended from scripts:
 ```
 agentforest connect <dir>        connect a root and scan it
 agentforest towns                list every visible town
+agentforest almanac <name|path>  read a town's memoir
 agentforest refresh              rescan all connected roots
 agentforest exclude <name|path>  hide a town (history kept)
 agentforest include <name|path>  restore a hidden town

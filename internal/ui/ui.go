@@ -1,7 +1,7 @@
 // Package ui is the interactive shell: roaming the forest, inspecting towns,
-// the groundskeeper's almanac (decay preview), connecting roots, and help.
-// All overlays are drawn onto the same canvas as the world, so there is
-// exactly one visual pipeline.
+// reading a town's almanac (its memoir), previewing the years of neglect,
+// connecting roots, and help. All overlays are drawn onto the same canvas as
+// the world, so there is exactly one visual pipeline.
 package ui
 
 import (
@@ -13,8 +13,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/harmonica"
 
+	"github.com/dklKevin/agentforest/internal/almanac"
 	"github.com/dklKevin/agentforest/internal/app"
 	"github.com/dklKevin/agentforest/internal/canvas"
+	"github.com/dklKevin/agentforest/internal/events"
 	"github.com/dklKevin/agentforest/internal/forest"
 	"github.com/dklKevin/agentforest/internal/gitscan"
 	"github.com/dklKevin/agentforest/internal/model"
@@ -46,7 +48,8 @@ type mode int
 const (
 	roam mode = iota
 	inspect
-	almanac
+	almanacView // the town's memoir, one deliberate keypress past inspect
+	preview     // the neglect preview: scrub years of decay ahead
 	helpView
 	connectInput
 	confirmExclude
@@ -99,6 +102,9 @@ type Config struct {
 	Seed    uint64
 	Demo    bool // world behind the UI is the demo forest
 	Onboard bool // first run: open on the connect panel
+	// Events is the log the demo world was folded from, so the almanac can
+	// read demo towns too; a real forest reads the live app log instead.
+	Events []events.Event
 }
 
 // Model is the Bubble Tea model for the whole app.
@@ -118,7 +124,7 @@ type Model struct {
 	target float64
 	spring harmonica.Spring
 	focus  *forest.Site
-	labbed *forest.Site // town locked by the almanac
+	labbed *forest.Site // town locked by the neglect preview
 	hint   bool
 
 	onboarding  bool   // connect panel is the first-run welcome
@@ -137,6 +143,8 @@ type Model struct {
 
 	epitaph      string      // the line being carved in the threshold panel
 	ceremonyAnim *finishAnim // the laying-to-rest in progress
+
+	evs []events.Event // the demo world's log; the almanac's source when demo
 }
 
 // New builds the UI over a laid-out world.
@@ -153,6 +161,7 @@ func New(cfg Config) Model {
 		fps:         map[string]string{},
 		revives:     map[string]*reviveAnim{},
 		compRevives: map[string]*reviveAnim{},
+		evs:         cfg.Events,
 	}
 	if cfg.Onboard {
 		m.mode = connectInput
@@ -250,7 +259,7 @@ func (m *Model) siteByPath(path string) *forest.Site {
 
 // rebuildWorld relays the forest out of the latest reduced state, keeping
 // the camera anchored to whatever the eye was on. IdleOverride previews and
-// the almanac lock survive by repo path.
+// the neglect preview's lock survive by repo path.
 func (m *Model) rebuildWorld() {
 	var focusPath, labbedPath string
 	var oldFocusX float64
@@ -276,7 +285,7 @@ func (m *Model) rebuildWorld() {
 	}
 	if labbedPath != "" {
 		m.labbed = m.siteByPath(labbedPath)
-		if m.labbed == nil && m.mode == almanac {
+		if m.labbed == nil && m.mode == preview {
 			m.mode = roam
 		}
 	}
@@ -298,6 +307,15 @@ func (m *Model) rebuildWorld() {
 			delete(m.fps, path)
 		}
 	}
+}
+
+// almanacEvents is the log the almanac folds: the live app log for a real
+// forest, the config-supplied events for the demo.
+func (m *Model) almanacEvents() []events.Event {
+	if !m.demo && m.app != nil {
+		return m.app.Events
+	}
+	return m.evs
 }
 
 // toast shows a quiet line at the bottom for a few seconds.
@@ -360,7 +378,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // runs or while a preview mode holds the world still.
 func (m *Model) maybePoll() tea.Cmd {
 	if m.demo || m.app == nil || m.scanning ||
-		m.mode == almanac || m.mode == connectInput || m.mode == confirmExclude ||
+		m.mode == preview || m.mode == connectInput || m.mode == confirmExclude ||
 		m.mode == confirmFinish || m.mode == ceremony {
 		return nil
 	}
@@ -556,8 +574,8 @@ func (m Model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.mode == confirmExclude {
 		return m.confirmKey(k)
 	}
-	if m.mode == almanac && m.labbed != nil {
-		if handled, mm := m.almanacKey(k); handled {
+	if m.mode == preview && m.labbed != nil {
+		if handled, mm := m.previewKey(k); handled {
 			return mm, nil
 		}
 	}
@@ -619,12 +637,20 @@ func (m Model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.epitaph = ""
 			}
 		}
+	case "a":
+		// The almanac: one deliberate keypress past inspect, never straight
+		// off the map.
+		if m.mode == inspect && m.focus != nil {
+			m.mode = almanacView
+		} else if m.mode == almanacView {
+			m.mode = inspect
+		}
 	case "d":
-		if m.mode == almanac {
+		if m.mode == preview {
 			m.mode = roam
 			m.labbed = nil
 		} else if m.focus != nil {
-			m.mode = almanac
+			m.mode = preview
 			m.labbed = m.focus
 			m.centerOn(m.focus)
 		}
@@ -782,6 +808,8 @@ func (m Model) beginCeremony() (tea.Model, tea.Cmd) {
 			m.toast("could not save · " + err.Error())
 			return m, nil
 		}
+	} else if m.demo {
+		m.evs = append(m.evs, events.Event{Kind: events.KindFinish, Repo: t.Name, TS: now, Path: t.Path, Epitaph: epitaph})
 	}
 	m.epitaph = ""
 	if epitaph != "" {
@@ -879,11 +907,14 @@ func (m *Model) unfinish(s *forest.Site) {
 		return
 	}
 	t := s.Town
+	now := time.Now()
 	if !m.demo && m.app != nil && t.Path != "" {
-		if err := m.app.Unfinish(t.Path, time.Now()); err != nil {
+		if err := m.app.Unfinish(t.Path, now); err != nil {
 			m.toast("could not save · " + err.Error())
 			return
 		}
+	} else if m.demo {
+		m.evs = append(m.evs, events.Event{Kind: events.KindUnfinish, Repo: t.Name, TS: now, Path: t.Path})
 	}
 	t.Finished = false
 	t.CarveOverride = nil
@@ -891,8 +922,8 @@ func (m *Model) unfinish(s *forest.Site) {
 	m.toast(t.Name + " · the hearth is lit again")
 }
 
-// almanacKey adjusts the locked town's preview idle time.
-func (m Model) almanacKey(k string) (bool, Model) {
+// previewKey adjusts the locked town's preview idle time.
+func (m Model) previewKey(k string) (bool, Model) {
 	t := m.labbed.Town
 	cur := t.Idle(m.now)
 	set := func(d time.Duration) Model {
@@ -943,8 +974,10 @@ func (m Model) View() string {
 	switch m.mode {
 	case inspect:
 		m.drawInspect()
-	case almanac:
+	case almanacView:
 		m.drawAlmanac()
+	case preview:
+		m.drawPreview()
 	case helpView:
 		m.drawHelp()
 	case connectInput:
@@ -1045,7 +1078,7 @@ func (m Model) drawInspect() {
 	mix := topMix(t.Mix, 3)
 	lines := []line{
 		{t.Name, 230, 235},
-		{fmt.Sprintf("planted %s · %s", t.FirstTS.Format("january 2006"), age(m.now.Sub(t.FirstTS))), 150, 0},
+		{fmt.Sprintf("planted %s · %s", almanac.MonthYear(t.FirstTS), age(m.now.Sub(t.FirstTS))), 150, 0},
 		{mix, 150, 0},
 		{fmt.Sprintf("%s commits · %s", commas(t.TotalCommits), plural(len(t.Tags), "release")), 150, 0},
 		{"last tended " + ago(t.Idle(m.now)), 150, 0},
@@ -1087,10 +1120,44 @@ func (m Model) drawInspect() {
 			lines = append(lines, line{fmt.Sprintf("and %d more", len(bs)-6), 110, 0})
 		}
 	}
+	lines = append(lines, line{"", 0, 0}, line{"a · the almanac", 115, 0})
 	m.panel(lines)
 }
 
+// drawAlmanac is the town's memoir: its life folded from the same event log
+// the forest grows from, told in a handful of lines. For a finished town the
+// carved words lead. It lives one deliberate keypress past inspect and never
+// touches the map.
 func (m Model) drawAlmanac() {
+	if m.focus == nil {
+		return
+	}
+	t := m.focus.Town
+	key := t.Path
+	if m.demo || key == "" {
+		// The demo log keys towns by name; real logs key by canonical path.
+		key = t.Name
+	}
+	mem := almanac.Fold(m.almanacEvents(), key, m.now)
+	lines := []line{{"almanac · " + t.Name, 230, 235}, {"", 0, 0}}
+	if mem == nil {
+		lines = append(lines, line{"the log holds no story yet", 150, 0})
+	} else {
+		if mem.Epitaph != "" {
+			lines = append(lines, line{"\"" + mem.Epitaph + "\"", 200, 90})
+		}
+		if mem.Brief != "" {
+			lines = append(lines, line{mem.Brief, 150, 0})
+		}
+		for _, c := range mem.Chapters {
+			lines = append(lines, line{c, 150, 0})
+		}
+	}
+	lines = append(lines, line{"", 0, 0}, line{"a back to inspect · esc the forest", 115, 0})
+	m.panel(lines)
+}
+
+func (m Model) drawPreview() {
 	if m.labbed == nil {
 		return
 	}
@@ -1103,7 +1170,7 @@ func (m Model) drawAlmanac() {
 		idleLine += " (preview)"
 	}
 	lines := []line{
-		{"groundskeeper's almanac · " + t.Name, 230, 235},
+		{"the years of neglect · " + t.Name, 230, 235},
 		{idleLine, 150, 0},
 		{model.StageLine(model.StageOf(d), t.Finished), 175, 60},
 		{"", 0, 0},
@@ -1190,8 +1257,9 @@ func (m Model) drawHelp() {
 		{"wander     ← → or h l · shift strides", 150, 0},
 		{"towns      tab / shift+tab · g oldest · G newest", 150, 0},
 		{"inspect    enter or i · numbers live here only", 150, 0},
+		{"almanac    a while inspecting · the town's memoir", 150, 0},
 		{"finished   f · lay a town to rest as a monument", 150, 0},
-		{"almanac    d · preview the years of neglect", 150, 0},
+		{"foresee    d · preview the years of neglect", 150, 0},
 		{"connect    c · add a root full of repositories", 150, 0},
 		{"exclude    x · hide the focused town", 150, 0},
 		{"refresh    r · rescan every root now", 150, 0},
