@@ -62,7 +62,7 @@ func RenderGallery(kind string, cw, ch int, prof canvas.Profile) (string, error)
 		// The seventh slot: what finished looks like instead.
 		x := step/2 + len(depths)*step
 		p.Draw(sprite.Tree{Seed: 7, Species: model.Oak, X: x, GroundY: gy, H: 68, Lvl: 150})
-		p.DrawSign(sprite.Sign{Seed: 3, X: x, GroundY: gy, Name: "done", Lvl: 135, Acc: 235, Monument: true})
+		p.DrawSign(sprite.Sign{Seed: 3, X: x, GroundY: gy, Name: "done", Lvl: 135, Acc: 235, Carve: 1})
 		c.Text(x/2-4, gy/4+2, "monument", 120, 0)
 	case "homestead":
 		type slot struct {
@@ -100,15 +100,19 @@ func RenderGallery(kind string, cw, ch int, prof canvas.Profile) (string, error)
 				for sprite.CabinDoorSide(seed) < 0 {
 					seed++
 				}
+				carve := 0.0
+				if s.fin {
+					carve = 1
+				}
 				p.DrawCabin(sprite.Cabin{
 					Seed: seed, X: x, GroundY: rgy, Tier: s.tier,
-					Lvl: 128, Decay: s.d, Finished: s.fin,
+					Lvl: 128, Decay: s.d, Carve: carve,
 				})
 				signX, signGY, hang, armC := sprite.CabinSignMount(s.tier, seed, x, rgy, len(s.name)+4, s.d)
 				p.DrawSign(sprite.Sign{
 					Seed: uint64(9 + i), X: signX, GroundY: signGY,
 					Name: s.name, Lvl: 135, Acc: 235,
-					Decay: s.d, Monument: s.fin, Hang: hang, ArmC: armC,
+					Decay: s.d, Carve: carve, Hang: hang, ArmC: armC,
 				})
 				c.Text(x/2-len(s.label)/2, rgy/4+2, s.label, 120, 0)
 			}

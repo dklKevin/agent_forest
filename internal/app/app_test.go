@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dklKevin/agentforest/internal/events"
+	"github.com/dklKevin/agentforest/internal/store"
 )
 
 func gitIn(t *testing.T, dir string, env []string, args ...string) {
@@ -121,14 +124,166 @@ func TestConnectPersistExcludeRelaunch(t *testing.T) {
 		t.Fatal("restore after exclude lost history")
 	}
 
-	// Finished persists by repo path.
+	// A legacy finished list in settings.json still stands: load synthesizes
+	// finish events from it, so old forests keep their monuments.
 	c.Settings.SetFinished(key, true)
 	c.SaveSettings()
 	d, _ := Load()
 	for _, tn := range d.Towns() {
 		if tn.Path == key && !tn.Finished {
-			t.Fatal("finished did not persist")
+			t.Fatal("legacy finished did not persist")
 		}
+	}
+
+	// Unfinishing a legacy monument sticks: the log records the reverse, the
+	// legacy entry is retired, and the next load does not resurrect it.
+	if err := d.Unfinish(key, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if d.Settings.IsFinished(key) {
+		t.Fatal("unfinish left the legacy settings entry")
+	}
+	e, _ := Load()
+	for _, tn := range e.Towns() {
+		if tn.Path == key && tn.Finished {
+			t.Fatal("legacy finish resurrected after unfinish")
+		}
+	}
+}
+
+func TestFinishCeremonyPersistsAndReverses(t *testing.T) {
+	t.Setenv("AGENTFOREST_HOME", t.TempDir())
+	root := t.TempDir()
+	repo := filepath.Join(root, "keepsake")
+	mkRepo(t, repo, time.Now().Add(-30*24*time.Hour), "main.go", strings.Repeat("g", 200))
+
+	a, _ := Load()
+	if _, err := a.ConnectRoot(root, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	key, err := a.FindTown("keepsake")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Finish with an epitaph; both survive a relaunch from the log alone.
+	if err := a.Finish(key, "shipped the thing", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := Load()
+	town := b.Towns()[0]
+	if !town.Finished || town.Epitaph != "shipped the thing" || town.FinishTS.IsZero() {
+		t.Fatalf("finish did not persist: %+v", town.RepoState)
+	}
+	if b.Settings.IsFinished(key) {
+		t.Fatal("finish leaked into settings; it belongs to the log")
+	}
+
+	// The quiet reverse: unfinished, but the carved words are kept.
+	if err := b.Unfinish(key, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := Load()
+	town = c.Towns()[0]
+	if town.Finished {
+		t.Fatal("unfinish did not persist")
+	}
+	if town.Epitaph != "shipped the thing" {
+		t.Fatalf("unfinish erased the epitaph: %q", town.Epitaph)
+	}
+
+	// Re-finishing unmarked brings the old words back with the monument.
+	if err := c.Finish(key, "", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	d, _ := Load()
+	town = d.Towns()[0]
+	if !town.Finished || town.Epitaph != "shipped the thing" {
+		t.Fatalf("re-finish lost the prior words: %+v", town.RepoState)
+	}
+
+	// Re-carving: the last epitaph wins.
+	if err := d.Finish(key, "slept better", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	e, _ := Load()
+	if got := e.Towns()[0].Epitaph; got != "slept better" {
+		t.Fatalf("last epitaph did not win: %q", got)
+	}
+}
+
+func TestUnfinishIgnoresLegacySettingsCleanupFailure(t *testing.T) {
+	dir := t.TempDir()
+	key := "/repos/keepsake"
+	if err := os.Mkdir(filepath.Join(dir, "settings.json"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a := &App{Dir: dir, Settings: &store.Settings{Finished: []string{key}}}
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+
+	if err := a.Unfinish(key, now); err != nil {
+		t.Fatalf("unfinish failed after appending event: %v", err)
+	}
+	if a.Settings.IsFinished(key) {
+		t.Fatal("legacy settings entry was not retired in memory")
+	}
+	if len(a.Events) != 1 || a.Events[0].Kind != events.KindUnfinish || !a.Events[0].TS.Equal(now) {
+		t.Fatalf("unfinish event was not kept in memory: %+v", a.Events)
+	}
+	evs, skipped, err := store.LoadEvents(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if skipped != 0 || len(evs) != 1 || evs[0].Kind != events.KindUnfinish || evs[0].Repo != key {
+		t.Fatalf("unfinish event was not persisted: skipped=%d events=%+v", skipped, evs)
+	}
+}
+
+func TestValidateEpitaph(t *testing.T) {
+	if err := ValidateEpitaph(""); err != nil {
+		t.Fatal("an unmarked monument must be allowed")
+	}
+	if err := ValidateEpitaph(strings.Repeat("x", EpitaphMaxRunes)); err != nil {
+		t.Fatalf("a full line must fit: %v", err)
+	}
+	if err := ValidateEpitaph(strings.Repeat("x", EpitaphMaxRunes+1)); err == nil {
+		t.Fatal("an epitaph beyond the cap must be refused")
+	}
+	if err := ValidateEpitaph("two\nlines"); err == nil {
+		t.Fatal("an epitaph must be one plain line")
+	}
+	if err := ValidateEpitaph("bad\u009bline"); err == nil {
+		t.Fatal("an epitaph must reject C1 controls")
+	}
+}
+
+func TestLegacySynthesisSkipsUnknownAndSettled(t *testing.T) {
+	ts := time.Date(2024, 3, 1, 0, 0, 0, 0, time.UTC)
+	evs := []events.Event{
+		{Kind: events.KindRepo, Repo: "/x/a", TS: ts, Path: "/x/a", Name: "a"},
+		{Kind: events.KindActivity, Repo: "/x/a", TS: ts, Commits: 1},
+		{Kind: events.KindRepo, Repo: "/x/b", TS: ts, Path: "/x/b", Name: "b"},
+		{Kind: events.KindUnfinish, Repo: "/x/b", TS: ts.AddDate(0, 1, 0)},
+	}
+	got := synthesizeLegacyFinishes(evs, []string{"/x/a", "/x/b", "/x/gone"})
+	repos := events.Reduce(got)
+	for _, r := range repos {
+		switch r.Path {
+		case "/x/a":
+			if !r.Finished {
+				t.Fatal("legacy /x/a not synthesized")
+			}
+			if !r.FinishTS.Equal(ts) {
+				t.Fatalf("synthesized finish should stamp the last activity, got %v", r.FinishTS)
+			}
+		case "/x/b":
+			if r.Finished {
+				t.Fatal("the log already decided /x/b; legacy must not override it")
+			}
+		}
+	}
+	if len(repos) != 2 {
+		t.Fatalf("a stale legacy path grew a ghost town: %d repos", len(repos))
 	}
 }
 

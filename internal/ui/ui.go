@@ -36,6 +36,9 @@ const (
 	// reviveDur is how long a town takes to shake off its decay when a new
 	// commit lands.
 	reviveDur = 1800 * time.Millisecond
+	// finishDur is how long the laying-to-rest ceremony takes: slow enough
+	// to read as a passage, short enough to stay one moment.
+	finishDur = 2200 * time.Millisecond
 )
 
 type mode int
@@ -47,6 +50,8 @@ const (
 	helpView
 	connectInput
 	confirmExclude
+	confirmFinish // the threshold panel: lay a town to rest, a word to carve
+	ceremony      // the laying-to-rest passage is playing
 )
 
 type tickMsg time.Time
@@ -73,6 +78,18 @@ type scanDoneMsg struct {
 type reviveAnim struct {
 	from  float64
 	start time.Time
+}
+
+// finishAnim is the laying-to-rest ceremony in flight: the inverse of the
+// revive beat. Over finishDur the town's decay stills to nothing, the carve
+// spreads down the name board, the hearth sends one last plume, and the
+// grove eases into its monument symmetry.
+type finishAnim struct {
+	path     string // repo path; demo towns have none and resolve by name
+	name     string
+	from     float64            // town decay when the ceremony began
+	fromComp map[string]float64 // each building's decay by component path
+	start    time.Time
 }
 
 // Config wires the UI to a laid-out world and its persistent state.
@@ -117,6 +134,9 @@ type Model struct {
 	compRevives map[string]*reviveAnim // repo path \x00 component -> transition
 	status      string                 // transient toast at the bottom
 	statusAt    time.Time
+
+	epitaph      string      // the line being carved in the threshold panel
+	ceremonyAnim *finishAnim // the laying-to-rest in progress
 }
 
 // New builds the UI over a laid-out world.
@@ -316,11 +336,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.focus = m.world.NearestSite(m.cam + m.dotW()/2)
 		m.stepRevives()
+		m.stepCeremony()
 		var cmd tea.Cmd
 		if c := m.maybePoll(); c != nil {
 			cmd = c
 		}
-		if moving || len(m.revives) > 0 {
+		if moving || len(m.revives) > 0 || m.ceremonyAnim != nil {
 			return m, tea.Batch(tick(moveFPS), cmd)
 		}
 		return m, tea.Batch(tick(idleFPS), cmd)
@@ -339,7 +360,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // runs or while a preview mode holds the world still.
 func (m *Model) maybePoll() tea.Cmd {
 	if m.demo || m.app == nil || m.scanning ||
-		m.mode == almanac || m.mode == connectInput || m.mode == confirmExclude {
+		m.mode == almanac || m.mode == connectInput || m.mode == confirmExclude ||
+		m.mode == confirmFinish || m.mode == ceremony {
 		return nil
 	}
 	if time.Since(m.lastPoll) < pollEvery {
@@ -524,6 +546,13 @@ func (m Model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.mode == connectInput {
 		return m.connectKey(msg)
 	}
+	if m.mode == confirmFinish {
+		return m.finishKey(msg)
+	}
+	if m.mode == ceremony {
+		// The passage holds the floor; it is over in a couple of seconds.
+		return m, nil
+	}
 	if m.mode == confirmExclude {
 		return m.confirmKey(k)
 	}
@@ -581,17 +610,13 @@ func (m Model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "f":
 		if m.focus != nil {
-			t := m.focus.Town
-			t.Finished = !t.Finished
-			if t.Finished {
-				t.IdleOverride = nil
-				delete(m.revives, t.Path)
-			}
-			if !m.demo && m.app != nil && t.Path != "" {
-				m.app.Settings.SetFinished(t.Path, t.Finished)
-				if err := m.app.SaveSettings(); err != nil {
-					m.toast("could not save · " + err.Error())
-				}
+			if m.focus.Town.Finished {
+				m.unfinish(m.focus)
+			} else {
+				// The threshold: finishing is a ceremony, never a toggle.
+				m.mode = confirmFinish
+				m.labbed = nil
+				m.epitaph = ""
 			}
 		}
 	case "d":
@@ -700,6 +725,172 @@ func (m Model) confirmKey(k string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// finishKey is the threshold panel's line editor: one carved line, enter to
+// lay the town to rest (an empty line leaves the monument unmarked), esc to
+// keep tending. A threshold, not a wizard - enter always crosses it.
+func (m Model) finishKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.mode = roam
+		return m, nil
+	case "enter":
+		if m.scanning {
+			return m, nil // the panel says the woods are being walked
+		}
+		return m.beginCeremony()
+	case "backspace":
+		if r := []rune(m.epitaph); len(r) > 0 {
+			m.epitaph = string(r[:len(r)-1])
+		}
+		return m, nil
+	case "ctrl+u":
+		m.epitaph = ""
+		return m, nil
+	}
+	switch msg.Type {
+	case tea.KeyRunes:
+		m.epitaph = capRunes(m.epitaph+string(msg.Runes), app.EpitaphMaxRunes)
+	case tea.KeySpace:
+		m.epitaph = capRunes(m.epitaph+" ", app.EpitaphMaxRunes)
+	}
+	return m, nil
+}
+
+// capRunes truncates s to at most n runes: an epitaph is carved, not written.
+func capRunes(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n])
+	}
+	return s
+}
+
+// beginCeremony carves the epitaph into the log and starts the laying-to-rest
+// passage. The words are kept the moment the threshold is crossed, so even an
+// interrupted ceremony loses nothing; the animation then plays out and lands
+// exactly on the monument the world would build.
+func (m Model) beginCeremony() (tea.Model, tea.Cmd) {
+	s := m.focus
+	if s == nil {
+		m.mode = roam
+		return m, nil
+	}
+	t := s.Town
+	epitaph := strings.TrimSpace(m.epitaph)
+	now := time.Now()
+	if !m.demo && m.app != nil && t.Path != "" {
+		if err := m.app.Finish(t.Path, epitaph, now); err != nil {
+			m.toast("could not save · " + err.Error())
+			return m, nil
+		}
+	}
+	m.epitaph = ""
+	if epitaph != "" {
+		t.RepoState.Epitaph = epitaph
+	}
+	t.RepoState.FinishTS = now
+
+	// The ceremony eases the town from its real depth, not a preview's.
+	t.IdleOverride = nil
+	delete(m.revives, t.Path)
+	anim := &finishAnim{
+		path: t.Path, name: t.Name,
+		from:     t.Decay(m.now),
+		fromComp: map[string]float64{},
+		start:    time.Now(),
+	}
+	for _, b := range s.Buildings {
+		anim.fromComp[b.B.Path] = t.BuildingDecay(b.B, m.now)
+		delete(m.compRevives, t.Path+"\x00"+b.B.Path)
+	}
+	m.ceremonyAnim = anim
+	m.mode = ceremony
+	m.centerOn(s)
+	return m, nil
+}
+
+// stepCeremony advances the laying-to-rest: the decay stills, the carve
+// deepens ridge-down, and the grove eases into its monument symmetry. The
+// final frame is exactly the monument the world builds for a finished town,
+// so completing needs no rebuild.
+func (m *Model) stepCeremony() {
+	a := m.ceremonyAnim
+	if a == nil {
+		return
+	}
+	s := m.ceremonySite(a)
+	if s == nil || s.Town.Finished {
+		// The world was rebuilt mid-passage; the derived state already
+		// stands finished, so the moment simply completes.
+		m.ceremonyAnim = nil
+		if m.mode == ceremony {
+			m.mode = roam
+		}
+		return
+	}
+	t := s.Town
+	p := float64(time.Since(a.start)) / float64(finishDur)
+	if p >= 1 {
+		t.Finished = true
+		t.CarveOverride = nil
+		t.IdleOverride = nil
+		for path := range a.fromComp {
+			delete(t.CompIdleOverride, path)
+		}
+		s.CarveGrove(1)
+		m.ceremonyAnim = nil
+		m.mode = roam
+		m.toast(t.Name + " stands as a monument")
+		return
+	}
+	ease := p * p * (3 - 2*p)
+	carve := ease
+	t.CarveOverride = &carve
+	ov := model.IdleForDecay(a.from * (1 - ease))
+	t.IdleOverride = &ov
+	if len(a.fromComp) > 0 && t.CompIdleOverride == nil {
+		t.CompIdleOverride = map[string]time.Duration{}
+	}
+	for path, from := range a.fromComp {
+		t.CompIdleOverride[path] = model.IdleForDecay(from * (1 - ease))
+	}
+	s.CarveGrove(ease)
+}
+
+// ceremonySite resolves the town under ceremony against the current world:
+// by repo path, or by name for demo towns that have none.
+func (m *Model) ceremonySite(a *finishAnim) *forest.Site {
+	if a.path != "" {
+		return m.siteByPath(a.path)
+	}
+	for _, s := range m.world.Sites {
+		if s.Town.Name == a.name {
+			return s
+		}
+	}
+	return nil
+}
+
+// unfinish lights the hearth again: the quiet reverse of the ceremony. No
+// passage, no panel - the town simply returns to life. Every word ever
+// carved stays in the log; only the standing changes.
+func (m *Model) unfinish(s *forest.Site) {
+	if m.scanning {
+		m.toast("the woods are being walked · a moment")
+		return
+	}
+	t := s.Town
+	if !m.demo && m.app != nil && t.Path != "" {
+		if err := m.app.Unfinish(t.Path, time.Now()); err != nil {
+			m.toast("could not save · " + err.Error())
+			return
+		}
+	}
+	t.Finished = false
+	t.CarveOverride = nil
+	s.CarveGrove(0)
+	m.toast(t.Name + " · the hearth is lit again")
+}
+
 // almanacKey adjusts the locked town's preview idle time.
 func (m Model) almanacKey(k string) (bool, Model) {
 	t := m.labbed.Town
@@ -760,6 +951,8 @@ func (m Model) View() string {
 		m.drawConnect()
 	case confirmExclude:
 		m.drawConfirm()
+	case confirmFinish:
+		m.drawFinishConfirm()
 	}
 	if m.hint && m.mode == roam {
 		hint := "← → wander · tab towns · enter inspect · ? help"
@@ -804,7 +997,9 @@ type line struct {
 	acc  uint8
 }
 
-// panel clears a rectangle and draws framed lines onto the canvas.
+// panel clears a rectangle and draws framed lines onto the canvas. A line
+// longer than the window is trimmed with an ellipsis so the frame never
+// spills past the edges.
 func (m Model) panel(lines []line) {
 	w := 0
 	for _, l := range lines {
@@ -813,6 +1008,9 @@ func (m Model) panel(lines []line) {
 		}
 	}
 	w += 4
+	if w > m.w-2 {
+		w = m.w - 2
+	}
 	h := len(lines) + 2
 	x0 := (m.w - w) / 2
 	y0 := m.h - h - 2
@@ -830,7 +1028,11 @@ func (m Model) panel(lines []line) {
 		m.canv.Rune(x0+w-1, y0+y, '│', 100)
 	}
 	for i, l := range lines {
-		m.canv.Text(x0+2, y0+1+i, l.text, l.lvl, l.acc)
+		txt := l.text
+		if max := w - 4; len([]rune(txt)) > max {
+			txt = string([]rune(txt)[:max-1]) + "…"
+		}
+		m.canv.Text(x0+2, y0+1+i, txt, l.lvl, l.acc)
 	}
 }
 
@@ -849,8 +1051,19 @@ func (m Model) drawInspect() {
 		{"last tended " + ago(t.Idle(m.now)), 150, 0},
 		{model.StageLine(model.StageOf(d), t.Finished), 175, 60},
 	}
+	// The carved epitaph: the user's own words, read only here. The map
+	// stays silent; the monument just stands.
+	if t.Finished && t.Epitaph != "" {
+		lines = append(lines, line{"\"" + t.Epitaph + "\"", 200, 90})
+	}
 	if t.Path != "" {
-		lines = append(lines, line{collapseHome(t.Path), 110, 0})
+		// A deep path identifies by its tail; trim from the front.
+		p := collapseHome(t.Path)
+		if max := m.w - 8; max > 10 && len([]rune(p)) > max {
+			r := []rune(p)
+			p = "…" + string(r[len(r)-max:])
+		}
+		lines = append(lines, line{p, 110, 0})
 	}
 	// The settlement: what stands here, and how each building fares.
 	if bs := t.Buildings(); len(bs) > 0 {
@@ -948,6 +1161,28 @@ func (m Model) drawConfirm() {
 	})
 }
 
+// drawFinishConfirm is the threshold: the one place the product asks for
+// words. One short line, carved rather than written; enter with nothing
+// leaves the monument unmarked, and the ceremony is the same either way.
+func (m Model) drawFinishConfirm() {
+	if m.focus == nil {
+		return
+	}
+	lines := []line{
+		{"lay " + m.focus.Town.Name + " to rest as a monument?", 230, 235},
+		{"its hearth goes cold and its grove stands still · f lights it again", 150, 0},
+		{"", 0, 0},
+		{"a word to carve? (enter to leave it unmarked)", 150, 0},
+		{"> " + m.epitaph + "▌", 210, 0},
+	}
+	if m.scanning {
+		lines = append(lines, line{"the woods are being walked …", 150, 60})
+	}
+	lines = append(lines, line{"", 0, 0},
+		line{"enter lay it to rest · esc keep tending", 115, 0})
+	m.panel(lines)
+}
+
 func (m Model) drawHelp() {
 	lines := []line{
 		{"agentforest", 230, 235},
@@ -955,7 +1190,7 @@ func (m Model) drawHelp() {
 		{"wander     ← → or h l · shift strides", 150, 0},
 		{"towns      tab / shift+tab · g oldest · G newest", 150, 0},
 		{"inspect    enter or i · numbers live here only", 150, 0},
-		{"finished   f · freeze a town as a monument", 150, 0},
+		{"finished   f · lay a town to rest as a monument", 150, 0},
 		{"almanac    d · preview the years of neglect", 150, 0},
 		{"connect    c · add a root full of repositories", 150, 0},
 		{"exclude    x · hide the focused town", 150, 0},

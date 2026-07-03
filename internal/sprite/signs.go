@@ -9,17 +9,59 @@ import (
 // plaque; the name dims with the wood but never becomes unreadable, because
 // a town never loses its name.
 type Sign struct {
-	Seed     uint64
-	X        int // center, dots
-	GroundY  int // dots: board bottom line when hung, post base when planted
-	Name     string
-	Lvl      uint8   // frame brightness
-	Acc      uint8   // name warmth
-	Decay    float64 // weathers the plaque
-	Monument bool    // finished towns get the carved frame
-	Hang     bool    // a shingle off the homestead's eave: no post
-	ArmC     int     // cell x of the eave corner the bracket reaches; 0 = none
-	Focused  bool
+	Seed    uint64
+	X       int // center, dots
+	GroundY int // dots: board bottom line when hung, post base when planted
+	Name    string
+	Lvl     uint8   // frame brightness
+	Acc     uint8   // name warmth
+	Decay   float64 // weathers the plaque
+	Carve   float64 // 0 living wood .. 1 the finished town's carved stone frame
+	Hang    bool    // a shingle off the homestead's eave: no post
+	ArmC    int     // cell x of the eave corner the bracket reaches; 0 = none
+	Focused bool
+}
+
+// The carve choreography: where along the 0..1 laying-to-rest progress each
+// piece of the monument arrives. The finial leads at the peak, the stone
+// spreads down the board row by row - the same ridge-down grammar the roof is
+// built by - the hearth sends one last full plume before going cold, the
+// windows shutter, the cord is squared away, and the cairns stack last. At 1
+// everything lands exactly on the finished monument art the galleries pin.
+const (
+	carveFinial  = 0.06 // the finial begins its rise at the peak
+	carveTopRow  = 0.34 // the board's top row turns to stone
+	carveNameRow = 0.50 // the name row's frame follows
+	carveBaseRow = 0.66 // the base row, the stem, and the post
+	carveShutter = 0.55 // the windows are shuttered
+	carvePlume0  = 0.40 // the last plume holds full until here ...
+	carvePlume1  = 0.72 // ... and the hearth is cold past here
+	carveCord    = 0.62 // the cord is squared away; the axe is hung up
+	carveCairn0  = 0.70 // the cairns stack, course by course
+	carveCairn1  = 0.84
+	carveCairn2  = 0.96
+)
+
+// carve01 maps a settled boolean to the carve scale's endpoints.
+func carve01(finished bool) float64 {
+	if finished {
+		return 1
+	}
+	return 0
+}
+
+// cairnRows is how many cairn courses stand at a carve depth.
+func cairnRows(carve float64) int {
+	switch {
+	case carve >= carveCairn2:
+		return 3
+	case carve >= carveCairn1:
+		return 2
+	case carve >= carveCairn0:
+		return 1
+	default:
+		return 0
+	}
 }
 
 // DrawSign renders the plaque, post, and monument dressing.
@@ -44,16 +86,24 @@ func (p *P) DrawSign(s Sign) {
 	}
 	acc = uint8(float64(acc) * (1 - 0.35*weather))
 
-	tl, tr, bl, br := '╭', '╮', '╰', '╯'
-	hz, vt, stem := '─', '│', '┬'
-	if s.Monument {
-		tl, tr, bl, br = '╔', '╗', '╚', '╝'
-		hz, vt, stem = '═', '║', '╦'
+	// The carve spreads down the board row by row: wood above the stone line
+	// is already carved, wood below still waits.
+	tl, tr, hzTop := '╭', '╮', '─'
+	if s.Carve >= carveTopRow {
+		tl, tr, hzTop = '╔', '╗', '═'
+	}
+	vt := '│'
+	if s.Carve >= carveNameRow {
+		vt = '║'
+	}
+	bl, br, hzBase, stem, post := '╰', '╯', '─', '┬', '│'
+	if s.Carve >= carveBaseRow {
+		bl, br, hzBase, stem, post = '╚', '╝', '═', '╦', '║'
 	}
 
 	// Tilt: neglected plaques slump to one side, row by row.
 	tilt := 0
-	if !s.Monument && s.Decay > 0.35 {
+	if s.Carve <= 0 && s.Decay > 0.35 {
 		tilt = 1
 		if xnoise.Hash(s.Seed, 0x716)%2 == 0 {
 			tilt = -1
@@ -89,7 +139,7 @@ func (p *P) DrawSign(s Sign) {
 	o := rowOff(0)
 	put(cx+o, top, tl, frameLvl, 0, 1)
 	for i := 1; i < w-1; i++ {
-		put(cx+o+i, top, hz, frameLvl, 0, uint64(10+i))
+		put(cx+o+i, top, hzTop, frameLvl, 0, uint64(10+i))
 	}
 	put(cx+o+w-1, top, tr, frameLvl, 0, 2)
 	// The bracket arm ties a hung shingle back to its eave corner. A sagging
@@ -100,7 +150,7 @@ func (p *P) DrawSign(s Sign) {
 			lo, hi = s.ArmC+1, cx+o-1
 		}
 		for i := lo; i <= hi; i++ {
-			put(i, top, hz, frameLvl-8, 0, uint64(70+i-lo))
+			put(i, top, hzTop, frameLvl-8, 0, uint64(70+i-lo))
 		}
 	}
 	// Name row: frame may rot, the name persists.
@@ -112,7 +162,7 @@ func (p *P) DrawSign(s Sign) {
 	o = rowOff(2)
 	put(cx+o, top+2, bl, frameLvl, 0, 5)
 	for i := 1; i < w-1; i++ {
-		g := hz
+		g := hzBase
 		if !s.Hang && i == w/2 {
 			g = stem
 		}
@@ -124,33 +174,40 @@ func (p *P) DrawSign(s Sign) {
 		return
 	}
 	// Post to ground.
-	postG := vt
-	if s.Monument {
-		postG = '║'
-	}
 	for y := top + 3; y <= gy; y++ {
-		put(cx+w/2, y, postG, frameLvl-10, 0, uint64(50+y))
+		put(cx+w/2, y, post, frameLvl-10, 0, uint64(50+y))
 	}
 
-	if s.Monument {
+	if s.Carve > 0 {
 		p.monumentDressing(s, cx, w, top, gy)
 	}
 }
 
-// monumentDressing adds the completion cues: a carved finial and a pair of
-// stone cairns flanking the post.
+// monumentDressing adds the completion cues as the carve deepens: the finial
+// rises first at the peak, catching the warm light, and the pair of stone
+// cairns flanking the post stack last, course by course.
 func (p *P) monumentDressing(s Sign, cx, w, top, gy int) {
-	p.C.Rune(cx+w/2, top-1, '◆', s.Lvl+30)
+	if rise := xnoise.Smoothstep(carveFinial, carveNameRow, s.Carve); rise > 0 {
+		p.C.Rune(cx+w/2, top-1, '◆', uint8(int(s.Lvl)-12+int(42*rise)))
+	}
+	rows := cairnRows(s.Carve)
 	for side := -1; side <= 1; side += 2 {
 		bx := s.X + side*(w+3)
-		p.cairn(xnoise.Hash(s.Seed, uint64(side+7)), bx, s.GroundY, s.Lvl-15)
+		p.cairn(xnoise.Hash(s.Seed, uint64(side+7)), bx, s.GroundY, s.Lvl-15, rows)
 	}
 }
 
-// cairn stacks a small pyramid of stones in dots.
-func (p *P) cairn(seed uint64, x, gy int, lvl uint8) {
-	rows := [][2]int{{-2, 2}, {-1, 1}, {0, 0}}
-	for i, r := range rows {
+// cairn stacks a small pyramid of stones in dots; rows is how many courses
+// stand, bottom up, so the ceremony can raise it stone by stone.
+func (p *P) cairn(seed uint64, x, gy int, lvl uint8, rows int) {
+	courses := [][2]int{{-2, 2}, {-1, 1}, {0, 0}}
+	if rows < len(courses) {
+		if rows < 0 {
+			rows = 0
+		}
+		courses = courses[:rows]
+	}
+	for i, r := range courses {
 		y := gy - i
 		for dx := r[0]; dx <= r[1]; dx++ {
 			if xnoise.Unit(seed, uint64(i), uint64(dx+8)) < 0.9 {

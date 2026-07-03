@@ -264,6 +264,7 @@ func (w *World) sitePass(p *sprite.P, f Frame, s *Site, dw int, vs float64, grou
 // plane the settlement's connective tissue: the hearth, the well, worn
 // footpaths, and the split-rail fragments between the yards.
 func (w *World) settlementPass(p *sprite.P, f Frame, s *Site, dw int, vs float64, ground func(float64) int, midPlane bool) {
+	carve := s.Town.Carve()
 	for _, b := range s.Buildings {
 		if b.Mid != midPlane {
 			continue
@@ -282,7 +283,7 @@ func (w *World) settlementPass(p *sprite.P, f Frame, s *Site, dw int, vs float64
 			Seed: b.Seed, X: int(sx), GroundY: gy,
 			Form: b.B.Form, Share: b.B.Share,
 			Lvl: lvl, Decay: s.Town.BuildingDecay(b.B, f.Now),
-			Finished: s.Town.Finished,
+			Finished: buildingSettled(carve, b.Seed),
 			Focused:  f.Focus == s,
 		})
 		if !midPlane {
@@ -301,8 +302,8 @@ func (w *World) settlementPass(p *sprite.P, f Frame, s *Site, dw int, vs float64
 			GroundY: ground(float64(s.Hearth.X)),
 			Tier:    s.Hearth.Tier,
 			Lvl:     128, Decay: s.Town.Decay(f.Now),
-			Finished: s.Town.Finished,
-			Focused:  f.Focus == s,
+			Carve:   carve,
+			Focused: f.Focus == s,
 		})
 	}
 	if s.WellX != 0 {
@@ -353,12 +354,25 @@ func (w *World) signPass(p *sprite.P, f Frame, s *Site, dw int, vs float64, grou
 		X:    signX, GroundY: signGY,
 		Name: s.Town.Name,
 		Lvl:  135, Acc: 235,
-		Decay:    d,
-		Monument: s.Town.Finished,
-		Hang:     hang,
-		ArmC:     armC,
-		Focused:  f.Focus == s,
+		Decay:   d,
+		Carve:   s.Town.Carve(),
+		Hang:    hang,
+		ArmC:    armC,
+		Focused: f.Focus == s,
 	})
+}
+
+// buildingSettled is whether one settlement building has stilled at this
+// carve depth. Buildings settle in a stagger, each at its own moment, so the
+// ceremony moves through the settlement instead of snapping it whole.
+func buildingSettled(carve float64, seed uint64) bool {
+	if carve >= 1 {
+		return true
+	}
+	if carve <= 0 {
+		return false
+	}
+	return carve >= 0.45+0.25*xnoise.Unit(seed, 0xCA57)
 }
 
 // wildPass draws the untamed growth. Old west woods and snags behind the

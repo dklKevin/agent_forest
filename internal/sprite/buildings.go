@@ -87,7 +87,7 @@ func (p *P) DrawBuilding(b Building) {
 		p.DrawCabin(Cabin{
 			Seed: b.Seed, X: b.X, GroundY: b.GroundY,
 			Tier: homeplaceTier(b.Share), Lvl: b.Lvl,
-			Decay: b.Decay, Finished: b.Finished, Bare: true,
+			Decay: b.Decay, Carve: carve01(b.Finished), Bare: true,
 		})
 	case model.FormWorkshop:
 		p.workshop(b)
