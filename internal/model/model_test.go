@@ -74,3 +74,46 @@ func TestFinishedNeverDecays(t *testing.T) {
 		t.Fatalf("finished town decays: %v", d)
 	}
 }
+
+func TestTendCurve(t *testing.T) {
+	day := 24 * time.Hour
+	if v := TendAt(0); v != 1 {
+		t.Fatalf("tend at zero idle = %v, want 1", v)
+	}
+	// The three mood grades sit in distinct bands of one continuous curve.
+	today := TendAt(6 * time.Hour)
+	week := TendAt(4 * day)
+	kept := TendAt(12 * day)
+	if today <= 0.7 {
+		t.Fatalf("worked-today tend = %v, want > 0.7", today)
+	}
+	if week <= 0.2 || week >= 0.7 {
+		t.Fatalf("worked-this-week tend = %v, want in (0.2, 0.7)", week)
+	}
+	if kept <= 0.02 || kept >= 0.2 {
+		t.Fatalf("quiet-but-kept tend = %v, want in (0.02, 0.2)", kept)
+	}
+	// Out entirely past the cut, so deep decay stages carry no tend at all.
+	if v := TendAt(time.Duration(tendCutDays) * 24 * time.Hour); v != 0 {
+		t.Fatalf("tend past the cut = %v, want 0", v)
+	}
+	// Monotonic non-increasing across the whole range.
+	prev := 2.0
+	for h := 0; h < 24*30; h += 6 {
+		v := TendAt(time.Duration(h) * time.Hour)
+		if v > prev {
+			t.Fatalf("tend not monotonic at hour %d", h)
+		}
+		prev = v
+	}
+}
+
+func TestFinishedIsStillNotAlive(t *testing.T) {
+	town := &Town{Finished: true}
+	if v := town.Tend(time.Now()); v != 0 {
+		t.Fatalf("finished town tends: %v", v)
+	}
+	if v := town.BuildingTend(Building{}, time.Now()); v != 0 {
+		t.Fatalf("finished town's building tends: %v", v)
+	}
+}

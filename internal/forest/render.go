@@ -12,11 +12,11 @@ import (
 
 // Frame carries everything volatile about one rendered moment.
 type Frame struct {
-	Cam   float64 // left edge of the main plane, reference dots
-	T     float64 // seconds since launch, drives wind
-	Now   time.Time
-	Focus *Site // town under focus (sign brightens); may be nil
-	Spot  *Site // most recently tended town (lantern glow); may be nil
+	Cam   float64   // left edge of the main plane, reference dots
+	T     float64   // seconds since launch, drives wind
+	Now   time.Time // reference instant for tend, decay, age, and focus effects
+	Focus *Site     // town under focus (sign brightens); may be nil
+	Spot  *Site     // most recently tended town (lantern glow); may be nil
 }
 
 // Render paints the whole world for one frame.
@@ -155,7 +155,7 @@ func (w *World) groundPass(c *canvas.Canvas, f Frame, dw, dh int, vs float64, gr
 	for x := 0; x < dw; x++ {
 		wx := f.Cam + float64(x)
 		gy := ground(wx)
-		infl := w.decayInfluence(wx, f.Now)
+		infl, kept := w.groundInfluence(wx, f.Now)
 
 		// The earth line itself, softly broken.
 		if xnoise.Unit(w.Seed^0xEA, uint64(int(wx))) < 0.62 {
@@ -172,18 +172,25 @@ func (w *World) groundPass(c *canvas.Canvas, f Frame, dw, dh int, vs float64, gr
 				c.Dot(x, y, 38)
 			}
 		}
-		// Grass: everywhere a little, riotous where the forest is winning.
-		gdens := 0.16 + 0.5*infl + 0.12*xnoise.Value1(w.Seed^0xEC, wx*0.03)
+		// Grass: everywhere a little, riotous where the forest is winning,
+		// trimmed short and sparse where a yard is being kept.
+		gdens := 0.16 + 0.5*infl + 0.12*xnoise.Value1(w.Seed^0xEC, wx*0.03) - 0.07*kept
 		if xnoise.Unit(w.Seed^0xED, uint64(int(wx))) < gdens {
-			bh := 1 + int(xnoise.Unit(w.Seed^0xEE, uint64(int(wx)))*(2+3*infl))
+			bh := 1 + int(xnoise.Unit(w.Seed^0xEE, uint64(int(wx)))*(2+3*infl-1.4*kept))
 			for dy := 1; dy <= bh; dy++ {
 				c.Dot(x, gy-dy, uint8(76+int(18*xnoise.Unit(w.Seed^0xEF, uint64(int(wx))))))
 			}
 		}
-		// The trail: dashes wandering along the ground, fading to grass where
-		// a town is being reclaimed. The path to a ruin disappears first.
+		// The trail: dashes wandering along the ground, trodden nearly solid
+		// past a town being worked, fading to grass where one is being
+		// reclaimed. The path to a ruin disappears first; the path to a busy
+		// door barely breaks.
 		tw := int(wx)
-		if (tw/4)%2 == 0 {
+		on := (tw/4)%2 == 0
+		if !on && kept > 0 {
+			on = xnoise.Unit(w.Seed^0xE7, uint64(tw)) < kept*0.6
+		}
+		if on {
 			toff := int((xnoise.FBM1(w.Seed^0x7E, wx*0.016, 2) - 0.5) * 5)
 			tl := 82 * (1 - infl*0.95)
 			if tl > 30 {
@@ -193,23 +200,29 @@ func (w *World) groundPass(c *canvas.Canvas, f Frame, dw, dh int, vs float64, gr
 	}
 }
 
-// decayInfluence is how strongly the wild is winning at a world x: the max of
-// nearby towns' decay with soft falloff. Grass, trail, and undergrowth key off it.
-func (w *World) decayInfluence(wx float64, now time.Time) float64 {
-	best := 0.0
+// groundInfluence returns how strongly nearby towns shape the earth line:
+// decay lets the wild win, while tend keeps the yard swept and paths firm.
+func (w *World) groundInfluence(wx float64, now time.Time) (float64, float64) {
+	decayBest, tendBest := 0.0, 0.0
 	for _, s := range w.Sites {
 		d := s.Town.Decay(now)
-		if d <= 0 {
+		tend := s.Town.Tend(now)
+		if d <= 0 && tend <= 0 {
 			continue
 		}
 		half := float64(s.X1-s.X0)/2 + 26
 		dist := abs64(wx-float64(s.Center())) / half
-		v := d * math.Exp(-dist*dist*1.6)
-		if v > best {
-			best = v
+		e := math.Exp(-dist * dist * 1.6)
+		v := d * e
+		if v > decayBest {
+			decayBest = v
+		}
+		v = tend * e
+		if v > tendBest {
+			tendBest = v
 		}
 	}
-	return best
+	return decayBest, tendBest
 }
 
 // sitePass draws one town's grove (back rows or front rows) and its
@@ -283,13 +296,14 @@ func (w *World) settlementPass(p *sprite.P, f Frame, s *Site, dw int, vs float64
 			Seed: b.Seed, X: int(sx), GroundY: gy,
 			Form: b.B.Form, Share: b.B.Share,
 			Lvl: lvl, Decay: s.Town.BuildingDecay(b.B, f.Now),
+			Tend:     s.Town.BuildingTend(b.B, f.Now),
 			Finished: buildingSettled(carve, b.Seed),
 			Focused:  f.Focus == s,
 		})
 		if !midPlane {
 			// The worn path from this door back toward the hearth.
 			p.DrawFootpath(xnoise.Hash(b.Seed, 0xFA7), int(sx), s.Hearth.X-int(f.Cam), gy,
-				s.Town.BuildingDecay(b.B, f.Now))
+				s.Town.BuildingDecay(b.B, f.Now), s.Town.BuildingTend(b.B, f.Now))
 		}
 	}
 	if midPlane {
@@ -302,6 +316,7 @@ func (w *World) settlementPass(p *sprite.P, f Frame, s *Site, dw int, vs float64
 			GroundY: ground(float64(s.Hearth.X)),
 			Tier:    s.Hearth.Tier,
 			Lvl:     128, Decay: s.Town.Decay(f.Now),
+			Tend:    s.Town.Tend(f.Now),
 			Carve:   carve,
 			Focused: f.Focus == s,
 		})

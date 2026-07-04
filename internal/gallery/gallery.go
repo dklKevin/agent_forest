@@ -104,9 +104,13 @@ func RenderGallery(kind string, cw, ch int, prof canvas.Profile) (string, error)
 				if s.fin {
 					carve = 1
 				}
+				tend := 0.0 // a tended slot shows fullest life; the rest are quiet
+				if s.d == 0 && !s.fin {
+					tend = 1
+				}
 				p.DrawCabin(sprite.Cabin{
 					Seed: seed, X: x, GroundY: rgy, Tier: s.tier,
-					Lvl: 128, Decay: s.d, Carve: carve,
+					Lvl: 128, Decay: s.d, Tend: tend, Carve: carve,
 				})
 				signX, signGY, hang, armC := sprite.CabinSignMount(s.tier, seed, x, rgy, len(s.name)+4, s.d)
 				p.DrawSign(sprite.Sign{
@@ -148,7 +152,7 @@ func RenderGallery(kind string, cw, ch int, prof canvas.Profile) (string, error)
 		// The row caption sits at the far left. Inset the building row so the
 		// first slot's label never collides with the widest caption.
 		const capReserve = len("what remains") + 3 // cells
-		row := func(d float64, rgy int, caption string) {
+		row := func(d, tend float64, rgy int, caption string) {
 			inset := capReserve * 2
 			step := (cw*2 - inset) / (len(forms) + 1)
 			if step < 6 { // too narrow to inset; fall back to the even split
@@ -158,7 +162,7 @@ func RenderGallery(kind string, cw, ch int, prof canvas.Profile) (string, error)
 				x := inset + step/2 + i*step
 				p.DrawBuilding(sprite.Building{
 					Seed: uint64(70 + i), X: x, GroundY: rgy,
-					Form: s.f, Share: s.share, Lvl: 126, Decay: d,
+					Form: s.f, Share: s.share, Lvl: 126, Decay: d, Tend: tend,
 				})
 				c.Text(x/2-len(s.label)/2, rgy/4+2, s.label, 120, 0)
 			}
@@ -167,8 +171,8 @@ func RenderGallery(kind string, cw, ch int, prof canvas.Profile) (string, error)
 			c.Text(x/2-2, rgy/4+2, "well", 120, 0)
 			c.Text(2, rgy/4+2, caption, 100, 0)
 		}
-		row(0, int(float64(ch*4)*0.42), "tended")
-		row(0.93, int(float64(ch*4)*0.9), "what remains")
+		row(0, 1, int(float64(ch*4)*0.42), "tended")
+		row(0.93, 0, int(float64(ch*4)*0.9), "what remains")
 	default:
 		return "", fmt.Errorf("unknown gallery %q", kind)
 	}

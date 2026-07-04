@@ -22,7 +22,7 @@ type SnapshotOpts struct {
 	Width, Height int            // canvas size in cells
 	At            string         // center on this town; empty centers on the spot
 	T             float64        // wind phase seconds
-	Now           time.Time      // reference instant: decay, age, and the lantern key off it
+	Now           time.Time      // reference instant: tend, decay, age, and the lantern key off it
 	Profile       canvas.Profile // color emission (NoColor for shape-only goldens)
 }
 

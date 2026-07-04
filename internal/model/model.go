@@ -1,6 +1,6 @@
 // Package model turns derived repo state into towns: species, stature, grove
-// density, decay. All the meaning-bearing mappings live here, and none of
-// them involve color.
+// density, aliveness, and decay. All the meaning-bearing mappings live here,
+// and none of them involve color.
 package model
 
 import (
@@ -132,6 +132,31 @@ func DecayAt(idle time.Duration) float64 {
 	return xnoise.Clamp(d, 0, decayCap)
 }
 
+// Tend tuning. Aliveness is the other end of the same spectrum: fullest the
+// day of the work, easing through the week, an ember by the second, and out
+// entirely past the cut, where the decay vocabulary owns the town. Like
+// DecayAt it is one continuous curve; worked-today, worked-this-week, and
+// quiet-but-kept are reads of it, never discrete states.
+const (
+	tendTauDays = 5.0
+	tendCutDays = 16.0
+)
+
+// TendAt maps idle time to aliveness in [0, 1]: 1 the day of the work,
+// roughly half within the week, a low ember past two, nothing past the cut.
+func TendAt(idle time.Duration) float64 {
+	days := idle.Hours() / 24
+	if days <= 0 {
+		return 1
+	}
+	if days >= tendCutDays {
+		return 0
+	}
+	v := math.Exp(-days / tendTauDays)
+	// The ember goes out entirely by the cut, eased so it never pops.
+	return v * (1 - xnoise.Smoothstep(tendCutDays*0.7, tendCutDays, days))
+}
+
 // StageOf quantizes decay depth into a named stage.
 func StageOf(d float64) Stage {
 	switch {
@@ -215,6 +240,15 @@ func (t *Town) Decay(now time.Time) float64 {
 		return 0
 	}
 	return DecayAt(t.Idle(now))
+}
+
+// Tend returns the town's aliveness at now. A finished town is kept, not
+// alive: a monument is still.
+func (t *Town) Tend(now time.Time) float64 {
+	if t.Finished {
+		return 0
+	}
+	return TendAt(t.Idle(now))
 }
 
 // AgeYears is the town's age in years at now.
@@ -384,4 +418,13 @@ func (t *Town) BuildingDecay(b Building, now time.Time) float64 {
 		return 0
 	}
 	return DecayAt(t.BuildingIdle(b, now))
+}
+
+// BuildingTend is one building's aliveness at now, on its own component's
+// clock, so the barn can bustle while the schoolhouse dozes.
+func (t *Town) BuildingTend(b Building, now time.Time) float64 {
+	if t.Finished {
+		return 0
+	}
+	return TendAt(t.BuildingIdle(b, now))
 }
