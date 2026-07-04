@@ -528,6 +528,63 @@ func Fingerprint(path string) string {
 	return strconv.FormatUint(h.Sum64(), 16)
 }
 
+// HeadBranch returns the branch checked out in a repository, read straight
+// from the git dir like Fingerprint (no process spawned). A detached HEAD or
+// an unreadable repository returns "".
+func HeadBranch(path string) string {
+	gitDir := resolveGitDir(path)
+	if gitDir == "" {
+		return ""
+	}
+	b, err := os.ReadFile(filepath.Join(gitDir, "HEAD"))
+	if err != nil {
+		return ""
+	}
+	const prefix = "ref: refs/heads/"
+	s := strings.TrimSpace(string(b))
+	if !strings.HasPrefix(s, prefix) {
+		return ""
+	}
+	return strings.TrimPrefix(s, prefix)
+}
+
+// DefaultBranch returns the repository's default branch, best-effort and
+// exec-free: the branch origin/HEAD points at when a remote is set up, else
+// main or master when one exists locally, else "".
+func DefaultBranch(path string) string {
+	gitDir := resolveGitDir(path)
+	if gitDir == "" {
+		return ""
+	}
+	// Shared refs live in the common dir when the path is a linked worktree.
+	common := gitDir
+	if b, err := os.ReadFile(filepath.Join(gitDir, "commondir")); err == nil {
+		if t := strings.TrimSpace(string(b)); t != "" {
+			if !filepath.IsAbs(t) {
+				t = filepath.Join(gitDir, t)
+			}
+			common = t
+		}
+	}
+	if b, err := os.ReadFile(filepath.Join(common, "refs", "remotes", "origin", "HEAD")); err == nil {
+		const prefix = "ref: refs/remotes/origin/"
+		if s := strings.TrimSpace(string(b)); strings.HasPrefix(s, prefix) {
+			return strings.TrimPrefix(s, prefix)
+		}
+	}
+	packed, _ := os.ReadFile(filepath.Join(common, "packed-refs"))
+	for _, name := range []string{"main", "master"} {
+		if _, err := os.Stat(filepath.Join(common, "refs", "heads", name)); err == nil {
+			return name
+		}
+		if ref := " refs/heads/" + name; strings.Contains(string(packed), ref+"\n") ||
+			strings.HasSuffix(strings.TrimRight(string(packed), "\n"), ref) {
+			return name
+		}
+	}
+	return ""
+}
+
 // resolveGitDir maps a repository path to its actual git directory,
 // following the "gitdir: ..." indirection of worktrees and submodules.
 func resolveGitDir(path string) string {

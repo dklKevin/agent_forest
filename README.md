@@ -43,6 +43,15 @@ The inspect panel names each building's component and stage; the forest itself s
 - **Numberless by default.**
   Stats exist, but only when you deliberately inspect a town.
 
+## The guidebook
+
+Every town can explain itself.
+Press `b` on a focused town, from the forest or while inspecting, to open its guidebook: a quiet page where the place says what it is.
+The first words of the repository's own README lead the page, followed by the landmarks in plain words (what the town is built of, which buildings stand), the present state (planted, last tended, work underway off the default branch, a monument's standing), and which pages it keeps: readme, license, docs.
+Everything on the page is read from files already sitting in the repository, on your machine.
+Nothing is fetched, asked, or sent anywhere.
+A repository without a readable README still gets a page; it just says there are no guidebook pages yet.
+
 ## Running it
 
 ```
@@ -65,6 +74,7 @@ On a later real launch, towns with commits that landed while you were away may b
 - `tab` / `n` and `shift+tab` / `p` walk town to town; `g` oldest, `G` newest.
 - `enter` or `i` inspect the focused town; numbers live here only.
 - `a` while inspecting opens the town's almanac: its memoir, folded from its history - planted, long quiets and wakings, releases staked, and, leading a finished town's page, its carved words.
+- `b` opens the town's guidebook, from the forest or while inspecting: its own pages, read from local files alone.
 - `f` lay a town to rest as a monument: a short ceremony plays, and you may carve one short line, up to 40 characters (read back in inspect and the almanac, never on the map).
   On a monument, `f` quietly lights the hearth again; the carved words are kept.
 - `d` preview years of neglect in seconds.

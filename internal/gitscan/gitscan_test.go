@@ -332,3 +332,66 @@ func TestScanEmitsComponentsWithOwnClocks(t *testing.T) {
 		t.Fatalf("docs commit produced %+v, want one docs event at %v", compEvs, later)
 	}
 }
+
+// HeadBranch and DefaultBranch read the git dir as plain files: the branch
+// comes back with no process spawned, detached heads stay quiet, and the
+// default falls back to a local main when origin/HEAD is absent.
+func TestHeadAndDefaultBranch(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "branchy")
+	initRepo(t, dir)
+	commitAt(t, dir, time.Now().Add(-time.Hour), "a.go", "package a")
+
+	if got := HeadBranch(dir); got != "main" {
+		t.Fatalf("HeadBranch = %q, want main", got)
+	}
+	if got := DefaultBranch(dir); got != "main" {
+		t.Fatalf("DefaultBranch = %q, want main (local fallback)", got)
+	}
+
+	gitIn(t, dir, nil, "checkout", "-q", "-b", "feature/x")
+	if got := HeadBranch(dir); got != "feature/x" {
+		t.Fatalf("HeadBranch = %q, want feature/x", got)
+	}
+	if got := DefaultBranch(dir); got != "main" {
+		t.Fatalf("DefaultBranch = %q, want main", got)
+	}
+
+	// origin/HEAD, when present, names the default outright.
+	if err := os.MkdirAll(filepath.Join(dir, ".git", "refs", "remotes", "origin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".git", "refs", "remotes", "origin", "HEAD"),
+		[]byte("ref: refs/remotes/origin/trunk\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := DefaultBranch(dir); got != "trunk" {
+		t.Fatalf("DefaultBranch = %q, want trunk (origin/HEAD)", got)
+	}
+
+	// A detached HEAD names no branch at all.
+	gitIn(t, dir, nil, "checkout", "-q", "--detach")
+	if got := HeadBranch(dir); got != "" {
+		t.Fatalf("detached HeadBranch = %q, want empty", got)
+	}
+
+	if got := HeadBranch(filepath.Join(dir, "nope")); got != "" {
+		t.Fatalf("missing repo HeadBranch = %q, want empty", got)
+	}
+	if got := DefaultBranch(filepath.Join(dir, "nope")); got != "" {
+		t.Fatalf("missing repo DefaultBranch = %q, want empty", got)
+	}
+}
+
+// Packed refs still reveal the local default when loose ref files are gone.
+func TestDefaultBranchReadsPackedRefs(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "packed")
+	initRepo(t, dir)
+	commitAt(t, dir, time.Now().Add(-time.Hour), "a.go", "package a")
+	gitIn(t, dir, nil, "pack-refs", "--all")
+	if _, err := os.Stat(filepath.Join(dir, ".git", "refs", "heads", "main")); err == nil {
+		t.Skip("loose ref survived pack-refs; nothing to exercise")
+	}
+	if got := DefaultBranch(dir); got != "main" {
+		t.Fatalf("DefaultBranch = %q, want main from packed-refs", got)
+	}
+}
