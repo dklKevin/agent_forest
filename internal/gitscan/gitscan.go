@@ -86,6 +86,7 @@ func gitDirExists(dir string) bool {
 type Known struct {
 	Announced bool               // a repo event exists
 	LastTS    time.Time          // newest activity timestamp seen
+	DayCounts map[string]int     // activity commits already recorded per local day
 	Tags      map[string]bool    // tag names already recorded
 	Mix       map[string]float64 // last language snapshot
 	Comps     map[string]KnownComp
@@ -117,7 +118,7 @@ func Scan(path string, known Known, now time.Time) ([]events.Event, error) {
 			Path: path, Name: filepath.Base(path),
 		})
 	}
-	evs = append(evs, bucketByDay(path, stamps, known.LastTS)...)
+	evs = append(evs, bucketByDay(path, stamps, known.LastTS, known.DayCounts)...)
 
 	tags, err := tagEvents(path, known.Tags)
 	if err == nil {
@@ -154,38 +155,67 @@ func commitStamps(path string) ([]time.Time, error) {
 	return stamps, nil
 }
 
-// bucketByDay folds commits newer than after into one activity event per
-// local calendar day. Each event carries the newest commit time in its day,
-// so "last tended" stays truthful down to the minute.
-func bucketByDay(repo string, stamps []time.Time, after time.Time) []events.Event {
+// bucketByDay folds missing commits into one activity event per local calendar
+// day. Git commit timestamps are second-granularity, so the timestamp cursor
+// alone drops a follow-up commit that shares the last scan's second; the
+// recorded day counts catch those, plus commits that arrive later from another
+// ref. Commits strictly after the cursor are always emitted, so a stale or
+// over-attributed day count (say, after a timezone change re-shuffles which
+// local day old events fall on) can never swallow new work. Each event carries
+// the newest commit time in its day, so "last tended" stays truthful down to
+// the minute.
+func bucketByDay(repo string, stamps []time.Time, after time.Time, knownCounts map[string]int) []events.Event {
 	type bucket struct {
 		count int
+		after int
 		last  time.Time
 	}
 	byDay := map[string]*bucket{}
 	for _, ts := range stamps {
-		if !ts.After(after) {
+		afterStamp := ts.After(after)
+		if knownCounts == nil && !afterStamp {
 			continue
 		}
-		day := ts.Local().Format("2006-01-02")
+		day := ActivityDay(ts)
 		b := byDay[day]
 		if b == nil {
 			b = &bucket{}
 			byDay[day] = b
 		}
 		b.count++
+		if afterStamp {
+			b.after++
+		}
 		if ts.After(b.last) {
 			b.last = ts
 		}
 	}
 	var evs []events.Event
-	for _, b := range byDay {
+	for day, b := range byDay {
+		commits := b.count
+		if knownCounts != nil {
+			commits -= knownCounts[day]
+			if b.after > commits {
+				commits = b.after
+			}
+		}
+		if commits <= 0 {
+			continue
+		}
 		evs = append(evs, events.Event{
-			Kind: events.KindActivity, Repo: repo, TS: b.last, Commits: b.count,
+			Kind: events.KindActivity, Repo: repo, TS: b.last, Commits: commits,
 		})
 	}
 	sort.Slice(evs, func(i, j int) bool { return evs[i].TS.Before(evs[j].TS) })
 	return evs
+}
+
+// ActivityDay is the reconciliation key for one local calendar day. The
+// scanner buckets raw commit stamps with it, and the log-derived cursor
+// (app.KnownByRepo) must fold recorded activity with the same key, so the
+// two sides can never drift apart.
+func ActivityDay(ts time.Time) string {
+	return ts.Local().Format("2006-01-02")
 }
 
 func tagEvents(path string, knownTags map[string]bool) ([]events.Event, error) {
