@@ -38,6 +38,19 @@ const (
 	// reviveDur is how long a town takes to shake off its decay when a new
 	// commit lands.
 	reviveDur = 1800 * time.Millisecond
+	// The since-last-visit pulse: on launch, towns that stirred while the
+	// forest was closed wake with the same motion a live commit plays. At
+	// most maxPulses towns wake - a long absence stirs a handful of the most
+	// notable towns, never the whole forest - and they wake one after
+	// another, pulseStagger apart, so arriving reads as walking in on a
+	// forest stirring rather than a synchronized blink.
+	maxPulses    = 5
+	pulseStagger = 350 * time.Millisecond
+	// pulseFloor is the shallowest depth a pulse wakes from. A town that was
+	// bright the whole time still gets a visible stir - the smoke swells, the
+	// hearth window brightens - because the waking motion is the whole
+	// message; it fades to the exact ordinary frame.
+	pulseFloor = 0.12
 	// finishDur is how long the laying-to-rest ceremony takes: slow enough
 	// to read as a passage, short enough to stay one moment.
 	finishDur = 2200 * time.Millisecond
@@ -78,8 +91,13 @@ type scanDoneMsg struct {
 }
 
 // reviveAnim eases a town from its old decay back to truth after a commit.
+// A live revive eases to zero (the commit just landed); a since-last-visit
+// pulse eases to the town's real current depth, which may be deeper. A start
+// in the future holds the town at from until its moment arrives, which is
+// how the launch pulse staggers.
 type reviveAnim struct {
 	from  float64
+	to    float64
 	start time.Time
 }
 
@@ -102,6 +120,10 @@ type Config struct {
 	Seed    uint64
 	Demo    bool // world behind the UI is the demo forest
 	Onboard bool // first run: open on the connect panel
+	// LastOpened is when the forest was previously open: the since-last-visit
+	// pulse wakes towns that stirred after this instant. Zero means first run
+	// (or an upgrade from before the stamp existed): no pulse.
+	LastOpened time.Time
 	// Events is the log the demo world was folded from, so the almanac can
 	// read demo towns too; a real forest reads the live app log instead.
 	Events []events.Event
@@ -138,6 +160,7 @@ type Model struct {
 	lastPoll    time.Time
 	revives     map[string]*reviveAnim // repo path -> transition
 	compRevives map[string]*reviveAnim // repo path \x00 component -> transition
+	lastOpened  time.Time              // previous opening; feeds the launch pulse
 	status      string                 // transient toast at the bottom
 	statusAt    time.Time
 
@@ -161,6 +184,7 @@ func New(cfg Config) Model {
 		fps:         map[string]string{},
 		revives:     map[string]*reviveAnim{},
 		compRevives: map[string]*reviveAnim{},
+		lastOpened:  cfg.LastOpened,
 		evs:         cfg.Events,
 	}
 	if cfg.Onboard {
@@ -423,8 +447,11 @@ func (m *Model) stepRevives() {
 			delete(m.revives, path)
 			continue
 		}
+		if p < 0 {
+			p = 0 // a staggered pulse holds its depth until its moment
+		}
 		ease := p * p * (3 - 2*p)
-		d := anim.from * (1 - ease)
+		d := anim.to + (anim.from-anim.to)*(1-ease)
 		ov := model.IdleForDecay(d)
 		s.Town.IdleOverride = &ov
 	}
@@ -441,11 +468,14 @@ func (m *Model) stepRevives() {
 			delete(m.compRevives, key)
 			continue
 		}
+		if p < 0 {
+			p = 0
+		}
 		ease := p * p * (3 - 2*p)
 		if s.Town.CompIdleOverride == nil {
 			s.Town.CompIdleOverride = map[string]time.Duration{}
 		}
-		s.Town.CompIdleOverride[comp] = model.IdleForDecay(anim.from * (1 - ease))
+		s.Town.CompIdleOverride[comp] = model.IdleForDecay(anim.to + (anim.from-anim.to)*(1-ease))
 	}
 }
 
@@ -453,6 +483,19 @@ func (m Model) scanDone(msg scanDoneMsg) (tea.Model, tea.Cmd) {
 	m.scanning = false
 	if msg.kind == scanConnect {
 		return m.connectDone(msg)
+	}
+	if msg.kind == scanStartup {
+		// The catch-up scan: fold whatever landed while the forest was
+		// closed, then play the since-last-visit pulse from the log. The log
+		// already carries anything a CLI refresh appended while the app was
+		// closed, so the pulse runs even when this scan found nothing new
+		// itself - and even when the scan failed, the log on disk still
+		// tells the story.
+		if msg.err == nil && msg.rep.NewEvents > 0 {
+			m.rebuildWorld()
+		}
+		m.beginPulse()
+		return m, nil
 	}
 	if msg.err != nil {
 		if msg.kind == scanRefresh {
@@ -511,6 +554,60 @@ func (m Model) scanDone(msg scanDoneMsg) (tea.Model, tea.Cmd) {
 		m.toast("refreshed · nothing new")
 	}
 	return m, nil
+}
+
+// beginPulse plays the since-last-visit pulse: towns that stirred while the
+// forest was closed wake with the same motion a live commit plays - the
+// grove eases back to bright, the smoke returns - staggered, capped at
+// maxPulses, and fading on their own to the exact ordinary forest. Motion,
+// never a number: no counts, no lists, at most one soft line for the most
+// notable town that woke.
+func (m *Model) beginPulse() {
+	if m.demo || m.app == nil {
+		return
+	}
+	stirs := app.SinceLastVisit(m.app.Events, m.lastOpened, m.now)
+	started := 0
+	toasted := false
+	for _, st := range stirs {
+		if started >= maxPulses {
+			break
+		}
+		if st.NewCommits == 0 {
+			continue
+		}
+		s := m.siteByPath(st.Repo)
+		if s == nil || s.Town.Finished {
+			continue // excluded towns and monuments stand as they are
+		}
+		to := trueDecay(s.Town, m.now)
+		from := st.WakeDepth
+		if from < pulseFloor {
+			from = pulseFloor // a town bright the whole time still visibly stirs
+		}
+		if from <= to+0.02 {
+			continue // nothing lighter to wake into
+		}
+		m.revives[st.Repo] = &reviveAnim{
+			from:  from,
+			to:    to,
+			start: time.Now().Add(time.Duration(started) * pulseStagger),
+		}
+		started++
+		if !toasted && st.Woke() {
+			m.toast(st.Name + " stirred while you were away")
+			toasted = true
+		}
+	}
+}
+
+// trueDecay is the depth a town really stands at now, overrides aside: the
+// depth a pulse eases into.
+func trueDecay(t *model.Town, now time.Time) float64 {
+	if t.Finished || t.LastTS.IsZero() {
+		return 0
+	}
+	return model.DecayAt(now.Sub(t.LastTS))
 }
 
 func (m Model) connectDone(msg scanDoneMsg) (tea.Model, tea.Cmd) {
@@ -987,11 +1084,15 @@ func (m Model) View() string {
 	case confirmFinish:
 		m.drawFinishConfirm()
 	}
-	if m.hint && m.mode == roam {
+	// The hint and a toast share the bottom line; a live toast takes it whole
+	// so the two never interleave (the launch pulse can toast before any key
+	// has dismissed the hint).
+	showStatus := m.status != "" && time.Since(m.statusAt) < 4*time.Second && m.mode == roam
+	if m.hint && m.mode == roam && !showStatus {
 		hint := "← → wander · tab towns · enter inspect · ? help"
 		m.canv.Text((m.w-len([]rune(hint)))/2, m.h-1, hint, 88, 0)
 	}
-	if m.status != "" && time.Since(m.statusAt) < 4*time.Second && m.mode == roam {
+	if showStatus {
 		m.canv.Text((m.w-len([]rune(m.status)))/2, m.h-1, m.status, 100, 0)
 	}
 	return m.canv.Render()

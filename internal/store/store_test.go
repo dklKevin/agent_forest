@@ -3,6 +3,7 @@ package store
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -59,6 +60,51 @@ func TestSettingsRoundtripAndFirstRun(t *testing.T) {
 	}
 	if !got.SetFinished("/x/code/done", false) || got.IsFinished("/x/code/done") {
 		t.Fatal("unfinish broken")
+	}
+}
+
+func TestLastOpenedRoundtripAndBackCompat(t *testing.T) {
+	dir := t.TempDir()
+	// A settings.json from before the stamp existed parses to a zero stamp:
+	// the first-run signal, so upgrades never pulse spuriously.
+	old := []byte("{\n  \"roots\": [\"/x/code\"]\n}\n")
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), old, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, found, err := LoadSettings(dir)
+	if err != nil || !found {
+		t.Fatalf("old settings should load: found=%v err=%v", found, err)
+	}
+	if !s.LastOpened.IsZero() {
+		t.Fatalf("an absent stamp must read as never: %v", s.LastOpened)
+	}
+
+	// The stamp round-trips exactly.
+	ts := time.Date(2026, 7, 3, 8, 30, 0, 0, time.UTC)
+	s.LastOpened = ts
+	if err := SaveSettings(dir, s); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := LoadSettings(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.LastOpened.Equal(ts) {
+		t.Fatalf("stamp drifted: %v", got.LastOpened)
+	}
+
+	// A zero stamp stays out of the file, keeping the schema addition
+	// invisible until it is used.
+	got.LastOpened = time.Time{}
+	if err := SaveSettings(dir, got); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "lastOpened") {
+		t.Fatalf("a zero stamp leaked into settings.json:\n%s", b)
 	}
 }
 
