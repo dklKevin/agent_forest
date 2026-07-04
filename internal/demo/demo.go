@@ -1,6 +1,6 @@
 // Package demo grows a sample forest: twelve invented repositories with
-// plausible lives, spanning every species, age, size, and decay stage. It
-// emits the same event stream shape a real git adapter will emit.
+// plausible lives, spanning every species, age, size, tended mood, and decay
+// stage. It emits the same event stream shape a real git adapter will emit.
 package demo
 
 import (
@@ -33,7 +33,9 @@ type comp struct {
 // The demo cast. West to east this reads as a life: an ancient finished
 // village, a thriving old-growth town with one quarter gone quiet, the ruins
 // of something once large, and at the far east a lone sapling hut before
-// open dark.
+// open dark. The idle spread deliberately spans the tended moods too:
+// worked-today (winterwell, mossjar), worked-this-week (lanternfish,
+// driftnet), and quiet-but-kept (foxglove).
 var cast = []spec{
 	{"mothgate", 9.2, 7800, 400, 12, map[string]float64{"c": 0.86, "shell": 0.14}, true, []comp{
 		{"core", 1.0, 120, 400}, {"gate", 0.55, 60, 400}, {"tools", 0.2, 30, 420},
@@ -57,8 +59,8 @@ var cast = []spec{
 	{"lanternfish", 4.1, 2400, 2, 11, map[string]float64{"rust": 0.9, "toml": 0.1}, false, []comp{
 		{"fish", 1.0, 80, 2}, {"lure", 0.5, 30, 3}, {"tests", 0.17, 26, 2}, {"docs", 0.08, 10, 30},
 	}},
-	{"foxglove", 3.2, 900, 9, 4, map[string]float64{"swift": 0.95, "shell": 0.05}, false, []comp{
-		{"glove", 1.0, 44, 9}, {"kit", 0.3, 18, 20}, {"tests", 0.12, 14, 9},
+	{"foxglove", 3.2, 900, 12, 4, map[string]float64{"swift": 0.95, "shell": 0.05}, false, []comp{
+		{"glove", 1.0, 44, 12}, {"kit", 0.3, 18, 20}, {"tests", 0.12, 14, 12},
 	}},
 	{"paperboat", 2.3, 640, 130, 3, map[string]float64{"typescript": 0.83, "css": 0.17}, false, []comp{
 		{"boat", 1.0, 38, 130}, {"site", 0.35, 22, 150}, {"tests", 0.1, 12, 170},

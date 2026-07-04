@@ -1,8 +1,8 @@
 // The settlement: a town's components stand as outbuildings around the
 // hearth. Every form is told apart by silhouette alone, follows the cabin's
 // grammar (runes for structure, dots for mass), rots under the same patch
-// noise as the canopy, and leaves its own bones when it falls. Nothing here
-// touches the accent channel.
+// noise as the canopy, shows its own tended traces by density and shape, and
+// leaves its own bones when it falls. Nothing here touches the accent channel.
 package sprite
 
 import (
@@ -22,6 +22,7 @@ type Building struct {
 	Share    float64 // of the largest component, scales the form
 	Lvl      uint8
 	Decay    float64
+	Tend     float64 // 1 worked today .. 0 quiet: this component's own clock
 	Finished bool
 	Focused  bool
 }
@@ -74,9 +75,16 @@ func homeplaceTier(share float64) int {
 	return 0
 }
 
-// DrawBuilding renders one settlement structure with its current decay.
+// DrawBuilding renders one settlement structure with its current tend and decay.
 func (p *P) DrawBuilding(b Building) {
 	b.Decay = xnoise.Clamp(b.Decay, 0, 1)
+	b.Tend = xnoise.Clamp(b.Tend, 0, 1)
+	if b.Finished {
+		// A kept building is stilled by its Finished gates alone (no tools
+		// out, no pennant, no grain); the stances that read "kept as built" -
+		// the workshop's open doorway - stay exactly as the monument holds them.
+		b.Tend = 1
+	}
 	if b.Focused {
 		b.Lvl += 8
 	}
@@ -87,7 +95,7 @@ func (p *P) DrawBuilding(b Building) {
 		p.DrawCabin(Cabin{
 			Seed: b.Seed, X: b.X, GroundY: b.GroundY,
 			Tier: homeplaceTier(b.Share), Lvl: b.Lvl,
-			Decay: b.Decay, Carve: carve01(b.Finished), Bare: true,
+			Decay: b.Decay, Tend: b.Tend, Carve: carve01(b.Finished), Bare: true,
 		})
 	case model.FormWorkshop:
 		p.workshop(b)
@@ -107,9 +115,6 @@ func bWeather(d float64) float64 { return xnoise.Smoothstep(0.32, 0.97, d) }
 
 // bRuin dissolves what weather leaves.
 func bRuin(d float64) float64 { return xnoise.Smoothstep(0.86, 0.94, d) }
-
-// bFresh is how recently this building's component was worked: the traces.
-func bFresh(d float64) float64 { return 1 - xnoise.Smoothstep(0.008, 0.085, d) }
 
 // bput places a structural rune unless weather has taken that cell.
 func (p *P) bput(seed uint64, weather float64, x, y int, g rune, l uint8, idx uint64, fall float64) {
@@ -215,7 +220,7 @@ func (p *P) barn(b Building) {
 	roofRise := 4
 	weather := bWeather(b.Decay)
 	ruin := bRuin(b.Decay)
-	fresh := bFresh(b.Decay)
+	fresh := b.Tend
 	cx := b.X / 2
 	gyr := b.GroundY / 4
 	hw := wallW / 2
@@ -265,7 +270,8 @@ func (p *P) barn(b Building) {
 	if open {
 		p.C.Rune(cx-3, gyr, '╱', b.Lvl-16) // leaves swung wide
 		p.C.Rune(cx+2, gyr, '╲', b.Lvl-16)
-		for i := 0; i < 7; i++ { // hay at the threshold
+		hay := 3 + int(4*fresh) // the threshold scatter thins as the work cools
+		for i := 0; i < hay; i++ {
 			dx := int(xnoise.Range(b.Seed, -6, 7, 0x8A1, uint64(i)))
 			p.C.Dot(b.X+dx, b.GroundY+1-int(xnoise.Hash(b.Seed, 0x8A2, uint64(i))%2), b.Lvl-24)
 		}
@@ -290,7 +296,7 @@ func (p *P) barn(b Building) {
 func (p *P) watchtower(b Building) {
 	weather := bWeather(b.Decay)
 	ruin := bRuin(b.Decay)
-	fresh := bFresh(b.Decay)
+	fresh := b.Tend
 	cx := b.X / 2
 	gyr := b.GroundY / 4
 	_, rows := BuildingDims(b.Form, b.Share)
@@ -438,7 +444,7 @@ func (p *P) workshop(b Building) {
 	wallH := 2
 	weather := bWeather(b.Decay)
 	ruin := bRuin(b.Decay)
-	fresh := bFresh(b.Decay)
+	fresh := b.Tend
 	cx := b.X / 2
 	gyr := b.GroundY / 4
 	hw := wallW / 2
@@ -506,7 +512,7 @@ func (p *P) shedB(b Building) {
 	wallH := 2
 	weather := bWeather(b.Decay)
 	ruin := bRuin(b.Decay)
-	fresh := bFresh(b.Decay)
+	fresh := b.Tend
 	cx := b.X / 2
 	gyr := b.GroundY / 4
 	hw := wallW / 2
@@ -548,7 +554,7 @@ func (p *P) shedB(b Building) {
 func (p *P) crib(b Building) {
 	weather := bWeather(b.Decay)
 	ruin := bRuin(b.Decay)
-	fresh := bFresh(b.Decay)
+	fresh := b.Tend
 	cx := b.X / 2
 	gyr := b.GroundY / 4
 	// Stilts survive nearly everything.
@@ -632,9 +638,10 @@ func (p *P) DrawFence(seed uint64, x0, x1, gy int, lvl uint8, d float64) {
 	}
 }
 
-// DrawFootpath wears a faint branch trail between a building and the hearth,
-// fading as the building's own component goes quiet.
-func (p *P) DrawFootpath(seed uint64, x0, x1, gy int, d float64) {
+// DrawFootpath wears a faint branch trail between a building and the hearth:
+// trodden nearly unbroken while the building's component is worked, back to
+// sparse dashes as it rests, fading out as it goes quiet.
+func (p *P) DrawFootpath(seed uint64, x0, x1, gy int, d, tend float64) {
 	if x1 < x0 {
 		x0, x1 = x1, x0
 	}
@@ -643,9 +650,15 @@ func (p *P) DrawFootpath(seed uint64, x0, x1, gy int, d float64) {
 		return
 	}
 	for x := x0; x <= x1; x++ {
-		if (x/3)%2 == 0 {
-			off := int((xnoise.FBM1(seed, float64(x)*0.02, 2) - 0.5) * 4)
-			p.C.Dot(x, gy+2+off, uint8(tl))
+		on := (x/3)%2 == 0
+		if !on && tend > 0 {
+			// Fresh feet close the gaps in the worn line.
+			on = xnoise.Unit(seed, 0xF00, uint64(x)) < tend*0.55
 		}
+		if !on {
+			continue
+		}
+		off := int((xnoise.FBM1(seed, float64(x)*0.02, 2) - 0.5) * 4)
+		p.C.Dot(x, gy+2+off, uint8(tl))
 	}
 }

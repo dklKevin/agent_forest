@@ -35,8 +35,8 @@ const (
 	// while the app is open. The check is stat-only (no processes spawned),
 	// so it costs microseconds.
 	pollEvery = 2500 * time.Millisecond
-	// reviveDur is how long a town takes to shake off its decay when a new
-	// commit lands.
+	// reviveDur is how long a town takes to shake off decay and show tended
+	// traces again when a new commit lands.
 	reviveDur = 1800 * time.Millisecond
 	// The since-last-visit pulse: on launch, towns that stirred while the
 	// forest was closed wake with the same motion a live commit plays. At
@@ -48,7 +48,7 @@ const (
 	pulseStagger = 350 * time.Millisecond
 	// pulseFloor is the shallowest depth a pulse wakes from. A town that was
 	// bright the whole time still gets a visible stir - the smoke swells, the
-	// hearth window brightens - because the waking motion is the whole
+	// lamplight returns - because the waking motion is the whole
 	// message; it fades to the exact ordinary frame.
 	pulseFloor = 0.12
 	// finishDur is how long the laying-to-rest ceremony takes: slow enough
@@ -90,11 +90,13 @@ type scanDoneMsg struct {
 	paths []string // live only: the repos that changed
 }
 
-// reviveAnim eases a town from its old decay back to truth after a commit.
-// A live revive eases to zero (the commit just landed); a since-last-visit
-// pulse eases to the town's real current depth, which may be deeper. A start
-// in the future holds the town at from until its moment arrives, which is
-// how the launch pulse staggers.
+// reviveAnim eases a town from an old idle depth back to truth after a
+// commit. The stored values are decay depths; tend follows because both
+// vocabularies derive from the same idle override. A live revive eases to
+// zero (the commit just landed); a since-last-visit pulse eases to the
+// town's real current depth, which may be deeper. A start in the future holds
+// the town at from until its moment arrives, which is how the launch pulse
+// staggers.
 type reviveAnim struct {
 	from  float64
 	to    float64
@@ -433,7 +435,7 @@ func (m *Model) maybePoll() tea.Cmd {
 }
 
 // stepRevives eases reviving towns, and reviving buildings, from their old
-// decay back to the truth.
+// idle depth back to the truth, so decay and tend cues change together.
 func (m *Model) stepRevives() {
 	for path, anim := range m.revives {
 		s := m.siteByPath(path)
@@ -505,7 +507,8 @@ func (m Model) scanDone(msg scanDoneMsg) (tea.Model, tea.Cmd) {
 	}
 	if msg.rep.NewEvents > 0 {
 		// Remember how deep each changed town, and each of its buildings,
-		// stood before the news.
+		// stood before the news. The depth is converted back to idle during
+		// the revive so decay and tend cues animate from the same clock.
 		oldDecay := map[string]float64{}
 		oldComp := map[string]float64{}
 		for _, s := range m.world.Sites {
@@ -530,7 +533,8 @@ func (m Model) scanDone(msg scanDoneMsg) (tea.Model, tea.Cmd) {
 				revived = append(revived, s.Town.Name)
 			}
 			// The precise stir: buildings whose components were touched
-			// shake off their own decay, even when the town was awake.
+			// shake off their own decay and bring their tended traces back,
+			// even when the town was awake.
 			for _, b := range s.Buildings {
 				key := s.Town.Path + "\x00" + b.B.Path
 				wasB, had := oldComp[key]
@@ -558,7 +562,7 @@ func (m Model) scanDone(msg scanDoneMsg) (tea.Model, tea.Cmd) {
 
 // beginPulse plays the since-last-visit pulse: towns that stirred while the
 // forest was closed wake with the same motion a live commit plays - the
-// grove eases back to bright, the smoke returns - staggered, capped at
+// grove eases back to bright, smoke and paths return - staggered, capped at
 // maxPulses, and fading on their own to the exact ordinary forest. Motion,
 // never a number: no counts, no lists, at most one soft line for the most
 // notable town that woke.

@@ -3,6 +3,8 @@
 // rune log courses with crossed corner notches; the gable roof is dot-shaded
 // shake; the stone chimney is drawn from the ground up in every frame, so
 // deep decay does not add a ruin, it reveals the one thing that never falls.
+// Smoke, lamplight, chips, and the axe grade from Tend; structural failure
+// still comes from Decay.
 package sprite
 
 import (
@@ -19,6 +21,7 @@ type Cabin struct {
 	Tier    int // 0 hut, 1 cabin, 2 homestead
 	Lvl     uint8
 	Decay   float64 // 0 lived-in .. ~1 chimney and sills
+	Tend    float64 // 1 worked today .. 0 quiet: smoke, chips, lamplight grade off it
 	Carve   float64 // 0 lived-in .. 1 a kept homestead: shuttered, stocked, still
 	Bare    bool    // an outbuilding dwelling: cold chimney, no dooryard
 	Focused bool
@@ -85,7 +88,7 @@ func CabinSignMount(tier int, seed uint64, x, groundY, nameW int, d float64) (si
 	return signX, (groundY/4 - wallH + 3) * 4, true, cornerC
 }
 
-// DrawCabin renders the homestead with its current decay applied.
+// DrawCabin renders the homestead with its current tend and decay applied.
 func (p *P) DrawCabin(cb Cabin) {
 	d := xnoise.Clamp(cb.Decay, 0, 1)
 	wallW, wallH, roofRise := CabinDims(cb.Tier)
@@ -283,6 +286,16 @@ func (p *P) cabinWindows(cb Cabin, lvl uint8, d, weather float64, cx, gyr, hw, s
 			return
 		}
 		p.C.Rune(wc, gyr-1, '□', glass)
+		// Worked today: lamplight pools on the ground beneath the glass. The
+		// spill is dots, never color - the warm accent stays the lantern's.
+		// It lands in the first dot row below the wall courses, so the sill
+		// runes never swallow it.
+		if cb.Carve == 0 && cb.Tend > 0.7 {
+			spillY := (gyr + 1) * 4
+			p.C.Dot(wc*2, spillY, 108)
+			p.C.Dot(wc*2+1, spillY, 96)
+			p.C.Dot(wc*2-1, spillY, 88)
+		}
 	}
 	draw(cx-side*(hw-2), 1)
 	if cb.Tier >= 2 {
@@ -314,11 +327,20 @@ func (p *P) cabinChimney(cb Cabin, lvl uint8, cx, roofY0 int, rise, span float64
 	if cb.Carve >= 1 || cb.Bare {
 		return // a kept or outbuilding hearth is cold
 	}
-	fresh := 1 - xnoise.Smoothstep(0.008, 0.085, cb.Decay)
+	// The fire's life grades the whole plume: worked-today sends up a tall
+	// lively column, the week's end a steady wisp, a quiet-but-kept hearth
+	// the last straight thread of a banked fire.
+	fresh := cb.Tend
+	length := 7 + int(25*fresh)
+	curl := 0.7 + 0.6*fresh // a worked fire wanders; an ember thread hangs
+	mouth := 1 + int(2.2*fresh)
 	if cb.Carve > 0 {
 		// The ceremony: one last full plume, however quiet the hearth had
 		// grown, thinning to nothing as the stone spreads down the board.
 		fresh = 1 - xnoise.Smoothstep(carvePlume0, carvePlume1, cb.Carve)
+		length = 9 + int(21*fresh)
+		curl = 1
+		mouth = 3
 	}
 	if fresh <= 0.02 {
 		return
@@ -326,7 +348,6 @@ func (p *P) cabinChimney(cb Cabin, lvl uint8, cx, roofY0 int, rise, span float64
 	// Woodsmoke: firelit at the mouth so it reads even against foliage,
 	// widening and thinning as it climbs, wandering with the same wind that
 	// moves the trees.
-	length := 9 + int(21*fresh)
 	phase := xnoise.Range(cb.Seed, 0, 6.28, 0x5B)
 	for s := 0; s < length; s++ {
 		y := top - 1 - s
@@ -336,12 +357,12 @@ func (p *P) cabinChimney(cb Cabin, lvl uint8, cx, roofY0 int, rise, span float64
 		if k > 0.28+0.60*den {
 			continue
 		}
-		drift := math.Sin(p.T*0.85+float64(s)*0.34+phase)*(0.5+fs*2.8) +
-			p.wind(float64(chimX), float64(y))*fs*1.6
+		drift := (math.Sin(p.T*0.85+float64(s)*0.34+phase)*(0.5+fs*2.8) +
+			p.wind(float64(chimX), float64(y))*fs*1.6) * curl
 		x := chimX + int(math.Round(drift))
 		l := uint8(58 + int(88*(1-fs*fs)*(0.4+0.6*fresh)))
 		p.C.Dot(x, y, l)
-		if s < 3 {
+		if s < mouth {
 			p.C.Dot(x+1, y, l-10) // the dense lit column at the mouth
 		} else if fs > 0.4 && k < den*0.55 {
 			p.C.Dot(x+1, y, l-14)
@@ -429,8 +450,9 @@ func (p *P) cabinWoodstore(cb Cabin, lvl uint8, d float64, wallW, side int) {
 }
 
 // cabinStump is the chopping block in the dooryard. The axe stands in it
-// while the work is fresh, lies beside it a while, then is simply gone. The
-// stump, like all stumps, stays.
+// while the week's work is warm, is set down as the town goes quiet, lies
+// beside it a while, then is simply gone. Fresh-split chips scatter around
+// the block only the day of the work. The stump, like all stumps, stays.
 func (p *P) cabinStump(cb Cabin, lvl uint8, d float64, gyr, wallW, side int) {
 	sx := cb.X + side*(wallW+9)
 	p.C.Rune(sx/2, gyr, '▂', lvl-26)
@@ -440,12 +462,22 @@ func (p *P) cabinStump(cb Cabin, lvl uint8, d float64, gyr, wallW, side int) {
 		return // the axe is hung up; the work is done
 	}
 	switch {
-	case d < 0.15:
+	case cb.Tend >= 0.18:
 		p.C.Rune(sx/2, gyr-1, '╱', lvl-4)
 		hx := (sx / 2) * 2
 		p.C.Dot(hx-1, (gyr-1)*4, lvl+18) // the bit, a glint of steel
 		p.C.Dot(hx-1, (gyr-1)*4+1, lvl+8)
 		p.C.Dot(hx-2, (gyr-1)*4+1, lvl-2)
+		if cb.Carve == 0 && cb.Tend > 0.7 {
+			// The day's splitting, not yet swept: chips both sides of the block.
+			for i := 0; i < 6; i++ {
+				off := 2 + int(xnoise.Unit(cb.Seed, 0x69, uint64(i))*6)
+				if i%2 == 0 {
+					off = -off
+				}
+				p.C.Dot(sx+off, cb.GroundY-int(xnoise.Hash(cb.Seed, 0x6A, uint64(i))%2), lvl-30)
+			}
+		}
 	case d < 0.42:
 		p.C.Dot(sx+side*4, cb.GroundY-1, lvl+6) // fallen in the grass
 		p.C.Dot(sx+side*5, cb.GroundY-1, lvl-6)

@@ -13,30 +13,31 @@ Opening it should feel like visiting a place you made.
 
 At the heart of every town stands one hand-hewn cabin, the repo's hearth, nestled in a gap barely wider than its walls.
 The name board hangs off its eave, and the size of the homestead grows with the work done there.
-While a repo is being worked, woodsmoke rises, the cord is stacked under the lean-to, and an axe waits in the chopping block.
-Leave it, and the traces scatter, the roof opens, the walls fall, until only the stone chimney stands.
+While a repo is being worked, the dooryard reads alive without numbers: a fresh day throws a tall dense smoke plume, split chips, lamplight dots, and nearly unbroken paths; through the week those traces thin; after that a quiet-but-kept hearth holds only a banked thread and a set-down axe.
+Leave it longer, and the traces scatter, the roof opens, the walls fall, until only the stone chimney stands.
 The chimney always stands.
 
 A repo with real structure grows past a homestead into a settlement.
 Its major directories stand as buildings around the hearth, chosen by file spread as well as byte weight so one oversized generated artifact cannot swallow the rest of a working tree.
 The dominant component is the barn, the tests keep a watchtower, the docs keep a schoolhouse, and the rest take cabins, workshops, and sheds by their weight.
 Every building lives and dies on its own component's clock.
-Work the engine daily and let the docs rot, and the schoolhouse will be breaking apart while the barn doors stand open with hay at the threshold.
+Work the engine daily while the docs doze, and the barn can bustle with open doors, hay at the threshold, and a busy path while the schoolhouse sits quiet.
+Leave the docs long enough and that same schoolhouse will be breaking apart while other buildings still show recent work.
 A directory deleted from the repo keeps its building forever, falling slowly into the settlement's haunted quarter.
-Worn footpaths and split-rail fence fragments tie the yards together, understory grows between the buildings, and the old growth stands behind the rooflines.
+Worn footpaths and split-rail fence fragments tie the yards together, tended ground trims the understory near kept yards, and the old growth stands behind the rooflines.
 The inspect panel names each building's component and stage; the forest itself stays numberless.
 
 ## The rules that make it itself
 
 - **Shape carries meaning, never color.**
-  Age, language, size, and neglect are read from silhouette, height, density, and decay.
+  Age, language, size, recent tending, and neglect are read from silhouette, height, density, and decay.
   The world is greyscale on near-black, with a single warm accent reserved for focal points.
 - **A wild forest, never a grid.**
   Irregular spacing, rolling treelines, winding undergrowth.
   If it starts to look like a bar chart, it is wrong.
 - **The honesty layer.**
   A town you have stopped tending is slowly, beautifully reclaimed by the forest.
-  A commit revives it.
+  A commit revives it through smoke, paths, lamplight, and work left out.
   Laying it to rest turns it into a monument, with a short epitaph carved if you leave one.
   A long-dead town decays to ruins, but it never disappears.
 - **Numberless by default.**
