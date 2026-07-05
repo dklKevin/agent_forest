@@ -71,10 +71,14 @@ func Read(dir string) Pages {
 	return p
 }
 
-// readHead reads at most readmeBytes of a regular file.
+// readHead reads at most readmeBytes of a regular file. It requires a real
+// regular file at path - Lstat, not Stat, so a symlink is rejected outright
+// rather than followed: a README symlinked outside the repository must never
+// be read as the town's own words, and a FIFO or device at that path must
+// never block the open. This mirrors how gitscan treats a repo's files.
 func readHead(path string) ([]byte, bool) {
-	info, err := os.Stat(path)
-	if err != nil || info.IsDir() {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
 		return nil, false
 	}
 	f, err := os.Open(path)
@@ -104,8 +108,9 @@ var (
 func intro(text string) string {
 	var para []string
 	inFence := false
-	for _, ln := range strings.Split(text, "\n") {
-		s := strings.TrimSpace(ln)
+	lines := strings.Split(text, "\n")
+	for i := 0; i < len(lines); i++ {
+		s := strings.TrimSpace(lines[i])
 		if strings.HasPrefix(s, "```") || strings.HasPrefix(s, "~~~") {
 			inFence = !inFence
 			if len(para) > 0 {
@@ -122,6 +127,16 @@ func intro(text string) string {
 			}
 			continue
 		}
+		// A line underlined by === or --- is a setext (or reStructuredText)
+		// heading, not prose: skip the title and its rule so the first real
+		// paragraph leads, never the repository's name.
+		if i+1 < len(lines) && setextUnderline(strings.TrimSpace(lines[i+1])) {
+			if len(para) > 0 {
+				break
+			}
+			i++ // step past the underline too
+			continue
+		}
 		clean := stripInline(s)
 		if clean == "" {
 			if len(para) > 0 {
@@ -132,6 +147,15 @@ func intro(text string) string {
 		para = append(para, clean)
 	}
 	return capRunes(strings.Join(para, " "))
+}
+
+// setextUnderline reports whether s is a heading underline: a non-empty run
+// of only '=' or only '-', which marks the line above it as a heading.
+func setextUnderline(s string) bool {
+	if s == "" {
+		return false
+	}
+	return strings.Trim(s, "=") == "" || strings.Trim(s, "-") == ""
 }
 
 // noise reports lines that carry no story: headings, rules, tables, and

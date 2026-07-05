@@ -81,6 +81,63 @@ func TestIntroCapsLongParagraphs(t *testing.T) {
 	}
 }
 
+// A setext-underlined title is a heading, not prose: the first real
+// paragraph must lead, never the repository's name.
+func TestIntroSkipsSetextHeadings(t *testing.T) {
+	cases := []struct{ md, want string }{
+		{"keepsake\n========\n\nA quiet little place.", "A quiet little place."},
+		{"keepsake\n--------\n\nStill a quiet place.", "Still a quiet place."},
+		{"Project\n=======\n\nActual intro here.", "Actual intro here."},
+		// An overline-and-underline reStructuredText title, still just a name.
+		{"======\nProject\n======\n\nThe real words.", "The real words."},
+	}
+	for _, c := range cases {
+		if got := intro(c.md); got != c.want {
+			t.Fatalf("intro(%q) = %q, want %q", c.md, got, c.want)
+		}
+	}
+}
+
+// A single dash rule ends a paragraph without swallowing it, and a setext
+// underline under a mid-paragraph line ends the paragraph rather than being
+// mistaken for prose.
+func TestIntroSetextEndsRunningParagraph(t *testing.T) {
+	got := intro("First real words.\n\nNext section\n===========\n\nmore")
+	if got != "First real words." {
+		t.Fatalf("intro = %q, want the first paragraph only", got)
+	}
+}
+
+// A README that is nothing but a setext title yields no intro at all.
+func TestIntroSetextTitleOnly(t *testing.T) {
+	if got := intro("keepsake\n========\n"); got != "" {
+		t.Fatalf("title-only README gave %q", got)
+	}
+}
+
+// A symlinked README is never read: it could point outside the repository,
+// which would display another file's words as the town's own. The page falls
+// through as if no README existed.
+func TestReadRejectsSymlinkedReadme(t *testing.T) {
+	outside := filepath.Join(t.TempDir(), "secret.md")
+	if err := os.WriteFile(outside, []byte("# secrets\n\nleaked words from outside the repo.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(dir, "README.md")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	p := Read(dir)
+	if p.Intro != "" {
+		t.Fatalf("a symlinked README leaked words: %q", p.Intro)
+	}
+	for _, n := range p.Notable {
+		if n == "readme" {
+			t.Fatal("a symlinked README must not count as a kept page")
+		}
+	}
+}
+
 // Read on a repository with the full shelf finds every page in shelf order
 // and pulls the intro from the README.
 func TestReadFindsPages(t *testing.T) {
