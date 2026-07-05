@@ -3,8 +3,11 @@
 // renderer never sees anything but reduced state.
 //
 // Scans are incremental against what the event log already knows, so the log
-// stays append-only: a rescan emits only new activity days, new tags, and a
-// language snapshot when the mix has actually shifted.
+// stays append-only: a rescan emits only the missing activity, folded per
+// local day, along with new tags and a language snapshot when the mix has
+// actually shifted. Because commit timestamps are second-granular, that delta
+// includes a follow-up commit sharing the last scan's second, which the
+// timestamp cursor alone would drop.
 package gitscan
 
 import (
