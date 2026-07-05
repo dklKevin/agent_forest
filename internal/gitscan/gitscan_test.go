@@ -79,19 +79,12 @@ func TestBucketByDay(t *testing.T) {
 		t.Fatalf("cutoff not honored: %+v", evs)
 	}
 
-	// With recorded day counts, days holding more commits than the log
-	// remembers emit the delta even when the cursor has moved past them:
-	// day1 already recorded one of its two commits, day2 recorded none.
+	// Recorded day counts reconcile only the cursor day. Older days follow the
+	// plain timestamp cursor even when their recorded count is deficient.
 	evs = bucketByDay("r", []time.Time{day1a, day1b, day2}, day2,
-		map[string]int{ActivityDay(day1a): 1})
-	if len(evs) != 2 {
-		t.Fatalf("known counts did not catch existing-day or old deltas: %+v", evs)
-	}
-	if evs[0].Commits != 1 || !evs[0].TS.Equal(day1b) {
-		t.Fatalf("known day1 delta wrong: %+v", evs[0])
-	}
-	if evs[1].Commits != 1 || !evs[1].TS.Equal(day2) {
-		t.Fatalf("known day2 delta wrong: %+v", evs[1])
+		map[string]int{ActivityDay(day1a): 1, ActivityDay(day2): 1})
+	if len(evs) != 0 {
+		t.Fatalf("old day count delta must not bypass cursor: %+v", evs)
 	}
 
 	// A commit strictly after the cursor is emitted even when the recorded

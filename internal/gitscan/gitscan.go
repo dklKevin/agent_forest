@@ -84,9 +84,12 @@ func gitDirExists(dir string) bool {
 // Known is what the event log already recorded about one repository, so a
 // scan can emit only the delta.
 type Known struct {
-	Announced bool               // a repo event exists
-	LastTS    time.Time          // newest activity timestamp seen
-	DayCounts map[string]int     // activity commits already recorded per local day
+	Announced bool      // a repo event exists
+	LastTS    time.Time // newest activity timestamp seen
+	// DayCounts stores recorded activity commits by local day. Scans reconcile
+	// only LastTS's day because timezone changes can re-key older aggregate
+	// activity events and double-count history.
+	DayCounts map[string]int
 	Tags      map[string]bool    // tag names already recorded
 	Mix       map[string]float64 // last language snapshot
 	Comps     map[string]KnownComp
@@ -158,25 +161,31 @@ func commitStamps(path string) ([]time.Time, error) {
 // bucketByDay folds missing commits into one activity event per local calendar
 // day. Git commit timestamps are second-granularity, so the timestamp cursor
 // alone drops a follow-up commit that shares the last scan's second; the
-// recorded day counts catch those, plus commits that arrive later from another
-// ref. Commits strictly after the cursor are always emitted, so a stale or
-// over-attributed day count (say, after a timezone change re-shuffles which
-// local day old events fall on) can never swallow new work. Each event carries
-// the newest commit time in its day, so "last tended" stays truthful down to
-// the minute.
+// recorded day count catches those only on the cursor's local day. Reconciling
+// every historical day would let a timezone change re-key old aggregate
+// activity events and double-count history. Commits on every other day follow
+// the plain timestamp cursor; commits strictly after the cursor are always
+// emitted, so stale or over-attributed day counts cannot swallow new work.
+// Each event carries the newest commit time in its day, so "last tended" stays
+// truthful down to the minute.
 func bucketByDay(repo string, stamps []time.Time, after time.Time, knownCounts map[string]int) []events.Event {
 	type bucket struct {
 		count int
 		after int
 		last  time.Time
 	}
+	cursorDay := ""
+	if !after.IsZero() {
+		cursorDay = ActivityDay(after)
+	}
 	byDay := map[string]*bucket{}
 	for _, ts := range stamps {
 		afterStamp := ts.After(after)
-		if knownCounts == nil && !afterStamp {
+		day := ActivityDay(ts)
+		reconcileDay := knownCounts != nil && day == cursorDay
+		if !afterStamp && !reconcileDay {
 			continue
 		}
-		day := ActivityDay(ts)
 		b := byDay[day]
 		if b == nil {
 			b = &bucket{}
@@ -193,7 +202,7 @@ func bucketByDay(repo string, stamps []time.Time, after time.Time, knownCounts m
 	var evs []events.Event
 	for day, b := range byDay {
 		commits := b.count
-		if knownCounts != nil {
+		if knownCounts != nil && day == cursorDay {
 			commits -= knownCounts[day]
 			if b.after > commits {
 				commits = b.after
@@ -210,10 +219,10 @@ func bucketByDay(repo string, stamps []time.Time, after time.Time, knownCounts m
 	return evs
 }
 
-// ActivityDay is the reconciliation key for one local calendar day. The
-// scanner buckets raw commit stamps with it, and the log-derived cursor
-// (app.KnownByRepo) must fold recorded activity with the same key, so the
-// two sides can never drift apart.
+// ActivityDay is the reconciliation key for one local calendar day. The scanner
+// and log-derived cursor (app.KnownByRepo) use it consistently, but only the
+// cursor day is reconciled because aggregate activity events cannot safely
+// re-key every historical commit after timezone changes.
 func ActivityDay(ts time.Time) string {
 	return ts.Local().Format("2006-01-02")
 }
