@@ -94,11 +94,12 @@ func readHead(path string) ([]byte, bool) {
 }
 
 var (
-	imageRe   = regexp.MustCompile(`!\[[^\]]*\]\([^)]*\)`)
-	linkRe    = regexp.MustCompile(`\[([^\]]*)\]\([^)]*\)`)
-	refLinkRe = regexp.MustCompile(`\[([^\]]*)\]\[[^\]]*\]`)
-	htmlRe    = regexp.MustCompile(`<[^>]*>`)
-	spaceRe   = regexp.MustCompile(`\s+`)
+	imageRe      = regexp.MustCompile(`!\[[^\]]*\]\([^)]*\)`)
+	linkRe       = regexp.MustCompile(`\[([^\]]*)\]\([^)]*\)`)
+	refLinkRe    = regexp.MustCompile(`\[([^\]]*)\]\[[^\]]*\]`)
+	htmlRe       = regexp.MustCompile(`<[^>]*>`)
+	spaceRe      = regexp.MustCompile(`\s+`)
+	listMarkerRe = regexp.MustCompile(`^(?:[-+*]|\d+[.)])\s+`)
 )
 
 // intro pulls the first meaningful prose paragraph out of a README. Headings,
@@ -175,10 +176,12 @@ func noise(s string) bool {
 }
 
 // stripInline reduces one markdown line to its plain words: images and badges
-// vanish, links keep their text, code ticks and emphasis stars fall away, and
-// raw HTML tags are dropped. A line that was all markup reduces to "".
+// vanish, links keep their text, code ticks and emphasis stars fall away, a
+// leading list marker is dropped, and raw HTML tags are removed. A line that
+// was all markup reduces to "".
 func stripInline(s string) string {
 	s = strings.TrimLeft(s, "> ")
+	s = listMarkerRe.ReplaceAllString(s, "")
 	s = imageRe.ReplaceAllString(s, "")
 	s = linkRe.ReplaceAllString(s, "$1")
 	s = refLinkRe.ReplaceAllString(s, "$1")

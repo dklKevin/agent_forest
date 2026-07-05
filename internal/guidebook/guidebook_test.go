@@ -41,6 +41,26 @@ func TestIntroStripsInlineMarkup(t *testing.T) {
 	}
 }
 
+// A README that opens with a list is reflowed as clean prose: the leading
+// bullet or ordered-list markers never survive into the excerpt.
+func TestIntroStripsLeadingListMarkers(t *testing.T) {
+	cases := []struct{ md, want string }{
+		{"- Fast\n- Simple", "Fast Simple"},
+		{"+ Fast\n+ Simple", "Fast Simple"},
+		{"* Fast\n* Simple", "Fast Simple"},
+		{"1. First\n2. Second", "First Second"},
+		{"1) First\n2) Second", "First Second"},
+		{"> - Quoted bullet", "Quoted bullet"},
+		// A bare dash with no trailing space is not a list marker.
+		{"well-worn path", "well-worn path"},
+	}
+	for _, c := range cases {
+		if got := intro(c.md); got != c.want {
+			t.Fatalf("intro(%q) = %q, want %q", c.md, got, c.want)
+		}
+	}
+}
+
 // An empty README, or one that is all noise, yields no intro at all.
 func TestIntroEmptyAndAllNoise(t *testing.T) {
 	if got := intro(""); got != "" {
