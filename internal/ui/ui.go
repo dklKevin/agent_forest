@@ -236,6 +236,7 @@ func scanCmd(a *app.App, kind scanKind, root string, paths []string) tea.Cmd {
 				rep.Repos += r.Repos
 				rep.Changed += r.Changed
 				rep.NewEvents += r.NewEvents
+				rep.OccupancyShift = rep.OccupancyShift || r.OccupancyShift
 				rep.Errors = append(rep.Errors, r.Errors...)
 				if e != nil && err == nil {
 					err = e
