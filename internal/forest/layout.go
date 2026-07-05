@@ -86,9 +86,14 @@ type Site struct {
 	Fences    []Fence
 	WellX     int // communal well; 0 means none
 	StakesX   int // release stakes: where the trail leaves the settlement
-	BeltW     int // settlement belt edges: understory grows inside,
-	BeltE     int // old growth stays outside and behind
-	trees     []treeMeta
+	// CampX is where an occupancy camp pitches when the working tree holds
+	// unfinished work. The spot is always laid out - deterministic from
+	// stored state alone - so a camp appearing or breaking never moves a
+	// single tree; only presence decides whether anything is drawn there.
+	CampX int
+	BeltW int // settlement belt edges: understory grows inside,
+	BeltE int // old growth stays outside and behind
+	trees []treeMeta
 	// The grove's planting inputs, kept so CarveGrove can replant it at any
 	// depth between its wild and monument layouts.
 	ts          uint64
@@ -205,6 +210,17 @@ func placeSettlement(ts uint64, t *model.Town, cursor, treeRoom int) *Site {
 	// east of the hearth's yard, where the paths cross.
 	if len(placed) >= 3 {
 		site.WellX = hx + gapE + 7
+	}
+	// The camp pitch: on the chimney side of the hearth, just past the
+	// woodstore, at the edge of the kept ground. When the chimney side is
+	// east and the well holds that ground, the camp pitches by the door
+	// path west instead - the one stretch always clear of the well and of
+	// the first building's yard.
+	wallW, _, _ := sprite.CabinDims(tier)
+	doorSide := sprite.CabinDoorSide(hearthSeed)
+	site.CampX = hx - doorSide*(wallW+20)
+	if doorSide < 0 && site.WellX != 0 {
+		site.CampX = hx - (wallW + 20)
 	}
 	site.placeFences(ts)
 	return site

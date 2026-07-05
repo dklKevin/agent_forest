@@ -359,6 +359,22 @@ func (w *World) signPass(p *sprite.P, f Frame, s *Site, dw int, vs float64, grou
 	gy := ground(float64(s.SignX))
 	stakes := s.StakesX - int(f.Cam)
 	p.DrawTags(xnoise.Hash(w.Seed, 0x7A6, uint64(s.SignX)), stakes, ground(float64(s.StakesX)), len(s.Town.Tags), 100, d)
+	// The occupancy camp: someone is at the town while the working tree
+	// holds unfinished work. Presence only - drawn fresh from the latest
+	// scan's read, never from anything stored - and a monument stays still,
+	// so a finished town never shows one.
+	if s.Town.Occupancy.Occupied() && !s.Town.Finished {
+		away := 1
+		if s.CampX < s.Hearth.X {
+			away = -1
+		}
+		p.DrawCamp(sprite.Camp{
+			Seed: xnoise.Hash(w.Seed, 0xCA3B, uint64(s.SignX)),
+			X:    s.CampX - int(f.Cam), GroundY: ground(float64(s.CampX)),
+			Away: away, Lvl: 118,
+			Second: s.Town.Occupancy.Worktrees > 0,
+		})
+	}
 	signX, signGY, hang, armC := sprite.CabinSignMount(
 		s.Hearth.Tier, s.Hearth.Seed, int(sx), gy, len(s.Town.Name)+4, d)
 	if !hang {

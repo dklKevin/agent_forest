@@ -27,6 +27,14 @@ type App struct {
 	HasSettings bool // settings.json existed; false means first run
 	Events      []events.Event
 	Skipped     int // unreadable event-log lines skipped while loading
+
+	// occupancy is each repo's working state as of the latest scan: in
+	// memory only, by design. It never touches the event log or settings, so
+	// a camp can only exist while a scan just saw the work standing. The scan
+	// goroutine writes and prunes it while the UI goroutine reads it through
+	// Towns(); occMu guards every one of those accesses.
+	occMu     sync.Mutex
+	occupancy map[string]gitscan.Occupancy
 }
 
 // Load reads settings and the event log from the storage directory.
@@ -90,14 +98,35 @@ func (a *App) Connected() bool {
 // folded from the log's finish/unfinish events.
 func (a *App) Towns() []*model.Town {
 	repos := events.Reduce(a.Events)
+	occ := a.occupancySnapshot()
 	towns := make([]*model.Town, 0, len(repos))
 	for _, r := range repos {
 		if r.Path != "" && a.Settings.IsExcluded(r.Path) {
 			continue
 		}
-		towns = append(towns, model.NewTown(r, r.Finished))
+		t := model.NewTown(r, r.Finished)
+		if o, ok := occ[r.Path]; ok {
+			t.Occupancy = model.Occupancy{Dirty: o.Dirty, Branch: o.Branch, Worktrees: o.Worktrees}
+		}
+		towns = append(towns, t)
 	}
 	return towns
+}
+
+// occupancySnapshot copies the occupancy map under occMu, so the map is never
+// read while the scan goroutine writes or prunes it. The lock is held only for
+// the copy, never across the town-building loop or any git or store I/O.
+func (a *App) occupancySnapshot() map[string]gitscan.Occupancy {
+	a.occMu.Lock()
+	defer a.occMu.Unlock()
+	if len(a.occupancy) == 0 {
+		return nil
+	}
+	snap := make(map[string]gitscan.Occupancy, len(a.occupancy))
+	for k, v := range a.occupancy {
+		snap[k] = v
+	}
+	return snap
 }
 
 // EpitaphMaxRunes is the carving limit. An epitaph is carved, not written:
@@ -202,6 +231,9 @@ type ScanReport struct {
 	Changed   int      // repositories that produced new events
 	NewEvents int      // events appended to the log
 	Errors    []string // per-repo scan failures, "path: reason"
+	// OccupancyShift reports that some repo's working-state read changed in
+	// this pass, so camps need a world rebuild even when no events landed.
+	OccupancyShift bool
 }
 
 // ConnectRoot records a new root directory and scans it. The root must
@@ -235,7 +267,22 @@ func (a *App) Reconcile(now time.Time) (ScanReport, error) {
 			kept = append(kept, r)
 		}
 	}
-	return a.scan(kept, now)
+	rep, err := a.scan(kept, now)
+	// Presence must never outlive its repo: a camp for a repository that is
+	// no longer discoverable (deleted, excluded, root removed) breaks here.
+	keptSet := map[string]bool{}
+	for _, r := range kept {
+		keptSet[r] = true
+	}
+	a.occMu.Lock()
+	for path := range a.occupancy {
+		if !keptSet[path] {
+			delete(a.occupancy, path)
+			rep.OccupancyShift = true
+		}
+	}
+	a.occMu.Unlock()
+	return rep, err
 }
 
 // RescanRepo reconciles a single repository: the live-update path while the
@@ -245,7 +292,9 @@ func (a *App) RescanRepo(path string, now time.Time) (ScanReport, error) {
 }
 
 // scan runs the git adapter over repos in parallel and appends whatever the
-// log is missing, in deterministic repo order.
+// log is missing, in deterministic repo order. Each repo's working state is
+// read in the same pass and held in memory only: occupancy rides the scan
+// cadence, never the log.
 func (a *App) scan(repos []string, now time.Time) (ScanReport, error) {
 	rep := ScanReport{Repos: len(repos)}
 	known := KnownByRepo(a.Events)
@@ -254,6 +303,7 @@ func (a *App) scan(repos []string, now time.Time) (ScanReport, error) {
 		repo string
 		evs  []events.Event
 		err  error
+		occ  gitscan.Occupancy
 	}
 	results := make([]result, len(repos))
 	var wg sync.WaitGroup
@@ -265,13 +315,21 @@ func (a *App) scan(repos []string, now time.Time) (ScanReport, error) {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			evs, err := gitscan.Scan(repo, known[repo], now)
-			results[i] = result{repo, evs, err}
+			results[i] = result{repo, evs, err, gitscan.ReadOccupancy(repo)}
 		}(i, repo)
 	}
 	wg.Wait()
 
+	a.occMu.Lock()
+	if a.occupancy == nil {
+		a.occupancy = map[string]gitscan.Occupancy{}
+	}
 	var fresh []events.Event
 	for _, r := range results {
+		if a.occupancy[r.repo] != r.occ {
+			rep.OccupancyShift = true
+		}
+		a.occupancy[r.repo] = r.occ
 		if r.err != nil {
 			rep.Errors = append(rep.Errors, r.repo+": "+r.err.Error())
 			continue
@@ -281,6 +339,7 @@ func (a *App) scan(repos []string, now time.Time) (ScanReport, error) {
 			fresh = append(fresh, r.evs...)
 		}
 	}
+	a.occMu.Unlock()
 	if len(fresh) > 0 {
 		if err := store.AppendEvents(a.Dir, fresh); err != nil {
 			return rep, err

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/dklKevin/agentforest/internal/events"
+	"github.com/dklKevin/agentforest/internal/model"
 	"github.com/dklKevin/agentforest/internal/xnoise"
 )
 
@@ -157,6 +158,33 @@ func activity(seed uint64, repo string, first, last time.Time, total int) []even
 		events.Event{Kind: events.KindActivity, Repo: repo, TS: last, Commits: maxi(remaining, 1)},
 	)
 	return evs
+}
+
+// Occupancies is the demo cast's current working states: winterwell, the
+// town worked today, keeps a camp by the path so the mark is discoverable in
+// the demo forest. Display state only - the demo event log stays exactly as
+// it was, the same rule real occupancy lives by.
+func Occupancies() map[string]model.Occupancy {
+	return map[string]model.Occupancy{
+		"winterwell": {Dirty: true, Branch: "thaw"},
+	}
+}
+
+// Towns builds the demo cast as towns, the way the CLI opens the demo
+// forest: the event log reduced, finish state applied, and the cast's
+// display-only occupancy attached.
+func Towns(seed uint64, now time.Time) ([]*model.Town, []events.Event) {
+	evs := Events(seed, now)
+	occ := Occupancies()
+	var towns []*model.Town
+	for _, r := range events.Reduce(evs) {
+		t := model.NewTown(r, r.Finished)
+		if o, ok := occ[r.Name]; ok && !r.Finished {
+			t.Occupancy = o
+		}
+		towns = append(towns, t)
+	}
+	return towns, evs
 }
 
 // FinishedNames reports which demo towns start life marked finished.

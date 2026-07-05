@@ -2,6 +2,7 @@ package ui
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -73,6 +74,114 @@ func press(t *testing.T, m Model, msg tea.Msg) Model {
 }
 
 func runes(s string) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)} }
+
+func gitInUI(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	base := []string{"-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"}
+	cmd := exec.Command("git", append(base, args...)...)
+	cmd.Env = os.Environ()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+func mkUIRepo(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitInUI(t, dir, "init", "-q", "-b", "main")
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitInUI(t, dir, "add", "-A")
+	gitInUI(t, dir, "commit", "-q", "-m", "c")
+}
+
+// The occupancy line lives in inspect and only while the working tree holds
+// work: one quiet line, the branch name the only identifier shown.
+func TestInspectShowsCampLineWhileOccupied(t *testing.T) {
+	now := time.Now()
+	town := uiTown("keepsake", false, "", now)
+	town.Occupancy = model.Occupancy{Dirty: true, Branch: "wip/glade"}
+	m := uiModel(t, town)
+	m.mode = inspect
+	if out := m.View(); !strings.Contains(out, "a camp by the path · work under way on wip/glade") {
+		t.Fatalf("inspect misses the camp line:\n%s", out)
+	}
+
+	// The tail follows the strongest signal when no branch is checked out.
+	town.Occupancy = model.Occupancy{Dirty: true}
+	if out := m.View(); !strings.Contains(out, "a camp by the path · unfinished work at the hearth") {
+		t.Fatalf("dirty-only camp line wrong:\n%s", out)
+	}
+	town.Occupancy = model.Occupancy{Worktrees: 2}
+	if out := m.View(); !strings.Contains(out, "a camp by the path · work under way in another clearing") {
+		t.Fatalf("worktrees-only camp line wrong:\n%s", out)
+	}
+
+	// No work, no camp - and no half-empty line either.
+	town.Occupancy = model.Occupancy{}
+	if out := m.View(); strings.Contains(out, "a camp by the path") {
+		t.Fatalf("an unoccupied town shows a camp line:\n%s", out)
+	}
+}
+
+// An occupancy-only shift rebuilds the world from app state, so a camp
+// pitches or breaks live even when no history landed; a no-change scan
+// leaves the world alone.
+func TestScanDoneRebuildsOnOccupancyShift(t *testing.T) {
+	a := &app.App{Dir: t.TempDir(), Settings: &store.Settings{}}
+	m := persistedUIModel(t, uiRepoTown("keepsake", "/repos/keepsake", false, "", time.Now()), a)
+	mm, _ := m.Update(scanDoneMsg{kind: scanLive})
+	if m = mm.(Model); len(m.world.Sites) != 1 {
+		t.Fatal("a no-change scan must not rebuild the world")
+	}
+	mm, _ = m.Update(scanDoneMsg{kind: scanLive, rep: app.ScanReport{OccupancyShift: true}})
+	if m = mm.(Model); len(m.world.Sites) != 0 {
+		t.Fatal("an occupancy shift did not rebuild the world from app state")
+	}
+}
+
+func TestScanLiveAggregatesOccupancyShift(t *testing.T) {
+	t.Setenv("AGENTFOREST_HOME", t.TempDir())
+	root := t.TempDir()
+	repo := filepath.Join(root, "busy")
+	mkUIRepo(t, repo)
+
+	a, err := app.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.ConnectRoot(root, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	key, err := a.FindTown("busy")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gitInUI(t, repo, "checkout", "-q", "-b", "wip")
+	msg := scanCmd(a, scanLive, "", []string{key})().(scanDoneMsg)
+	if msg.err != nil {
+		t.Fatal(msg.err)
+	}
+	if !msg.rep.OccupancyShift {
+		t.Fatalf("live scan dropped occupancy shift: %+v", msg.rep)
+	}
+}
+
+// A monument is still: a finished town keeps its inspect page free of camps
+// whatever the working tree holds.
+func TestInspectHidesCampOnFinishedTown(t *testing.T) {
+	town := uiTown("keepsake", true, "", time.Now())
+	town.Occupancy = model.Occupancy{Dirty: true, Branch: "wip"}
+	m := uiModel(t, town)
+	m.mode = inspect
+	if out := m.View(); strings.Contains(out, "a camp by the path") {
+		t.Fatalf("a finished town shows a camp line:\n%s", out)
+	}
+}
 
 // The carved words live in inspect and only in inspect: quoted under the
 // stage line while the town stands finished, absent the moment it does not.

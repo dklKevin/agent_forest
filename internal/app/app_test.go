@@ -324,3 +324,128 @@ func TestFindTownErrors(t *testing.T) {
 		t.Fatal("unknown town should error")
 	}
 }
+
+// Occupancy rides the scan: it is attached to towns from the latest read,
+// clears the moment the work is put away, and never lands in the event log.
+func TestScanReadsAndClearsOccupancy(t *testing.T) {
+	t.Setenv("AGENTFOREST_HOME", t.TempDir())
+	root := t.TempDir()
+	repo := filepath.Join(root, "busy")
+	mkRepo(t, repo, time.Now().Add(-48*time.Hour), "main.go", "package main")
+
+	a, _ := Load()
+	if _, err := a.ConnectRoot(root, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if a.Towns()[0].Occupancy.Occupied() {
+		t.Fatalf("clean repo reads occupied: %+v", a.Towns()[0].Occupancy)
+	}
+
+	gitIn(t, repo, nil, "checkout", "-q", "-b", "wip")
+	if err := os.WriteFile(filepath.Join(repo, "main.go"), []byte("package main // wip"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	key, _ := a.FindTown("busy")
+	rep, err := a.RescanRepo(key, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.OccupancyShift {
+		t.Fatalf("occupancy change not reported: %+v", rep)
+	}
+	town := a.Towns()[0]
+	if !town.Occupancy.Dirty || town.Occupancy.Branch != "wip" {
+		t.Fatalf("occupancy not attached: %+v", town.Occupancy)
+	}
+	for _, e := range a.Events {
+		switch e.Kind {
+		case events.KindRepo, events.KindActivity, events.KindTag, events.KindLangs, events.KindComp:
+		default:
+			t.Fatalf("occupancy leaked into the event log as %q", e.Kind)
+		}
+	}
+
+	// The work is put away: the camp breaks on the next read.
+	gitIn(t, repo, nil, "checkout", "-q", "--", "main.go")
+	gitIn(t, repo, nil, "checkout", "-q", "main")
+	rep, err = a.RescanRepo(key, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.OccupancyShift {
+		t.Fatalf("occupancy clear not reported: %+v", rep)
+	}
+	if a.Towns()[0].Occupancy.Occupied() {
+		t.Fatalf("occupancy did not clear: %+v", a.Towns()[0].Occupancy)
+	}
+
+	// A rescan with nothing changed reports no shift.
+	rep, err = a.RescanRepo(key, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.OccupancyShift {
+		t.Fatalf("steady state reported a shift: %+v", rep)
+	}
+}
+
+// Occupancy is ephemeral by design: a relaunch knows nothing of it until a
+// scan reads it again, so a stale camp can never haunt a town from disk.
+func TestOccupancyDoesNotSurviveRelaunch(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENTFOREST_HOME", home)
+	root := t.TempDir()
+	repo := filepath.Join(root, "busy")
+	mkRepo(t, repo, time.Now().Add(-48*time.Hour), "main.go", "package main")
+	gitIn(t, repo, nil, "checkout", "-q", "-b", "wip")
+
+	a, _ := Load()
+	if _, err := a.ConnectRoot(root, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if a.Towns()[0].Occupancy.Branch != "wip" {
+		t.Fatalf("occupancy not read: %+v", a.Towns()[0].Occupancy)
+	}
+
+	b, _ := Load()
+	if b.Towns()[0].Occupancy.Occupied() {
+		t.Fatalf("occupancy persisted across relaunch: %+v", b.Towns()[0].Occupancy)
+	}
+	if _, err := b.Reconcile(time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if b.Towns()[0].Occupancy.Branch != "wip" {
+		t.Fatalf("reconcile did not re-read occupancy: %+v", b.Towns()[0].Occupancy)
+	}
+}
+
+// A repo that vanishes from the roots takes its camp with it on the next
+// reconcile: presence never outlives its repo.
+func TestReconcilePrunesVanishedOccupancy(t *testing.T) {
+	t.Setenv("AGENTFOREST_HOME", t.TempDir())
+	root := t.TempDir()
+	repo := filepath.Join(root, "gone")
+	mkRepo(t, repo, time.Now().Add(-48*time.Hour), "main.go", "package main")
+	gitIn(t, repo, nil, "checkout", "-q", "-b", "wip")
+
+	a, _ := Load()
+	if _, err := a.ConnectRoot(root, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if a.Towns()[0].Occupancy.Branch != "wip" {
+		t.Fatalf("occupancy not read: %+v", a.Towns()[0].Occupancy)
+	}
+	if err := os.RemoveAll(repo); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := a.Reconcile(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.OccupancyShift {
+		t.Fatalf("pruned camp not reported: %+v", rep)
+	}
+	if a.Towns()[0].Occupancy.Occupied() {
+		t.Fatalf("camp outlived its repo: %+v", a.Towns()[0].Occupancy)
+	}
+}

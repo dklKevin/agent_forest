@@ -542,8 +542,10 @@ func mixChanged(a, b map[string]float64) bool {
 }
 
 // Fingerprint returns a cheap, exec-free change signal for a repository:
-// stat data of the ref stores plus HEAD content. Any commit, tag, branch
-// move, or checkout changes it. An unreadable repository returns "".
+// stat data of the ref stores, the index, and the linked-worktree records,
+// plus HEAD content. Any commit, tag, branch move, checkout, stage, or
+// worktree add changes it; a plain file edit that never touches git does
+// not, and waits for the next refresh. An unreadable repository returns "".
 func Fingerprint(path string) string {
 	gitDir := resolveGitDir(path)
 	if gitDir == "" {
@@ -553,20 +555,22 @@ func Fingerprint(path string) string {
 	if b, err := os.ReadFile(filepath.Join(gitDir, "HEAD")); err == nil {
 		h.Write(b)
 	}
-	for _, name := range []string{"logs/HEAD", "packed-refs"} {
+	for _, name := range []string{"logs/HEAD", "packed-refs", "index"} {
 		if info, err := os.Stat(filepath.Join(gitDir, name)); err == nil {
 			fmt.Fprintf(h, "%s:%d:%d;", name, info.Size(), info.ModTime().UnixNano())
 		}
 	}
-	filepath.WalkDir(filepath.Join(gitDir, "refs"), func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+	for _, dir := range []string{"refs", "worktrees"} {
+		filepath.WalkDir(filepath.Join(gitDir, dir), func(p string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			if info, err := d.Info(); err == nil {
+				fmt.Fprintf(h, "%s:%d:%d;", p, info.Size(), info.ModTime().UnixNano())
+			}
 			return nil
-		}
-		if info, err := d.Info(); err == nil {
-			fmt.Fprintf(h, "%s:%d:%d;", p, info.Size(), info.ModTime().UnixNano())
-		}
-		return nil
-	})
+		})
+	}
 	return strconv.FormatUint(h.Sum64(), 16)
 }
 
