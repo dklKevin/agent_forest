@@ -1,8 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +33,85 @@ func capture(t *testing.T, fn func() int) (string, int) {
 		t.Fatal(err)
 	}
 	return string(out), code
+}
+
+// gitCLI runs one git command in dir for the end-to-end CLI tests.
+func gitCLI(t *testing.T, dir string, env []string, args ...string) {
+	t.Helper()
+	base := []string{"-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"}
+	cmd := exec.Command("git", append(base, args...)...)
+	cmd.Env = append(os.Environ(), env...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+// mkCLIRepo creates a repository with one commit stamped at ts.
+func mkCLIRepo(t *testing.T, dir string, ts time.Time, file, content string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitCLI(t, dir, nil, "init", "-q", "-b", "main")
+	commitCLIAt(t, dir, ts, file, content)
+}
+
+// commitCLIAt commits a file change with author and committer time pinned to
+// ts, so tests can land two commits inside the same clock second.
+func commitCLIAt(t *testing.T, dir string, ts time.Time, file, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, file), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stamp := fmt.Sprintf("%d +0000", ts.Unix())
+	env := []string{"GIT_AUTHOR_DATE=" + stamp, "GIT_COMMITTER_DATE=" + stamp}
+	gitCLI(t, dir, nil, "add", "-A")
+	gitCLI(t, dir, env, "commit", "-q", "-m", "c: "+file)
+}
+
+// Git commit timestamps are second-granularity, so a follow-up commit landing
+// in the same second as the last scan's newest commit is invisible to a
+// timestamp-only cursor. Refresh must still record it.
+func TestRefreshCountsQuickCommitsInSameSecond(t *testing.T) {
+	t.Setenv("AGENTFOREST_HOME", t.TempDir())
+	root := t.TempDir()
+	repo := filepath.Join(root, "active-app")
+	stamp := time.Now().Add(-time.Hour).Truncate(time.Second)
+	mkCLIRepo(t, repo, stamp, "main.go", "package main\n")
+
+	if out, code := capture(t, func() int { return runCommand("connect", []string{root}) }); code != 0 {
+		t.Fatalf("connect exit = %d\n%s", code, out)
+	}
+
+	commitCLIAt(t, repo, stamp, "main.go", "package main\n// progress\n")
+	out, code := capture(t, func() int { return runCommand("refresh", nil) })
+	if code != 0 {
+		t.Fatalf("refresh exit = %d\n%s", code, out)
+	}
+	if strings.Contains(out, "new: nothing") {
+		t.Fatalf("refresh missed the same-second commit:\n%s", out)
+	}
+	if !regexp.MustCompile(`new: .+ across 1 town\b`).MatchString(out) {
+		t.Fatalf("refresh did not attribute the new history to the town:\n%s", out)
+	}
+
+	out, code = capture(t, func() int { return runCommand("towns", nil) })
+	if code != 0 {
+		t.Fatalf("towns exit = %d\n%s", code, out)
+	}
+	if !regexp.MustCompile(`active-app,[a-z]+,2,`).MatchString(out) {
+		t.Fatalf("same-second commit was not counted:\n%s", out)
+	}
+
+	// A second refresh finds the log already current: the recorded day
+	// count reconciles without re-emitting what it just caught.
+	out, code = capture(t, func() int { return runCommand("refresh", nil) })
+	if code != 0 {
+		t.Fatalf("second refresh exit = %d\n%s", code, out)
+	}
+	if !strings.Contains(out, "new: nothing (the log is current)") {
+		t.Fatalf("second refresh re-emitted recorded history:\n%s", out)
+	}
 }
 
 // almanacHome seeds a storage home with one town's life and points the app

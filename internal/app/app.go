@@ -305,6 +305,10 @@ func KnownByRepo(evs []events.Event) map[string]gitscan.Known {
 			if e.TS.After(k.LastTS) {
 				k.LastTS = e.TS
 			}
+			if k.DayCounts == nil {
+				k.DayCounts = map[string]int{}
+			}
+			k.DayCounts[gitscan.ActivityDay(e.TS)] += e.Commits
 		case events.KindTag:
 			if k.Tags == nil {
 				k.Tags = map[string]bool{}

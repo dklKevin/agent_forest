@@ -90,6 +90,24 @@ func TestInspectShowsEpitaphOnlyWhenFinished(t *testing.T) {
 	}
 }
 
+// The planted line must show the town's real first-commit month. A Go time
+// layout of "january 2006" treats the month as literal text, which once froze
+// every town's planted date to january; this locks the fixed rendering.
+func TestInspectShowsActualPlantedMonth(t *testing.T) {
+	town := uiTown("forge", false, "", time.Now())
+	town.FirstTS = time.Date(2026, 4, 9, 9, 0, 0, 0, time.UTC)
+	m := uiModel(t, town)
+	m.mode = inspect
+
+	view := m.View()
+	if !strings.Contains(view, "planted april 2026") {
+		t.Fatalf("inspect did not show the real planted month:\n%s", view)
+	}
+	if strings.Contains(view, "planted january") {
+		t.Fatalf("inspect showed the literal layout month:\n%s", view)
+	}
+}
+
 // f is a threshold, never a toggle: it opens the panel, the line editor caps
 // the carving, enter begins the passage, and only the passage's end leaves
 // the town standing finished.

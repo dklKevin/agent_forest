@@ -63,7 +63,7 @@ func TestBucketByDay(t *testing.T) {
 	day1a := time.Date(2024, 3, 1, 10, 0, 0, 0, time.Local)
 	day1b := time.Date(2024, 3, 1, 15, 30, 0, 0, time.Local)
 	day2 := time.Date(2024, 3, 2, 9, 0, 0, 0, time.Local)
-	evs := bucketByDay("r", []time.Time{day1a, day1b, day2}, time.Time{})
+	evs := bucketByDay("r", []time.Time{day1a, day1b, day2}, time.Time{}, nil)
 	if len(evs) != 2 {
 		t.Fatalf("buckets = %d, want 2", len(evs))
 	}
@@ -74,9 +74,74 @@ func TestBucketByDay(t *testing.T) {
 		t.Fatalf("day2 bucket wrong: %+v", evs[1])
 	}
 	// Only commits strictly after the cutoff appear.
-	evs = bucketByDay("r", []time.Time{day1a, day1b, day2}, day1b)
+	evs = bucketByDay("r", []time.Time{day1a, day1b, day2}, day1b, nil)
 	if len(evs) != 1 || evs[0].Commits != 1 {
 		t.Fatalf("cutoff not honored: %+v", evs)
+	}
+
+	// Recorded day counts reconcile only the cursor day. Older days follow the
+	// plain timestamp cursor even when their recorded count is deficient.
+	evs = bucketByDay("r", []time.Time{day1a, day1b, day2}, day2,
+		map[string]int{ActivityDay(day1a): 1, ActivityDay(day2): 1})
+	if len(evs) != 0 {
+		t.Fatalf("old day count delta must not bypass cursor: %+v", evs)
+	}
+
+	// A commit strictly after the cursor is emitted even when the recorded
+	// day count claims the day is fully accounted for (an over-attributed
+	// count, e.g. after a timezone change, must never swallow new work).
+	evs = bucketByDay("r", []time.Time{day1b}, day1a, map[string]int{ActivityDay(day1a): 1})
+	if len(evs) != 1 || evs[0].Commits != 1 || !evs[0].TS.Equal(day1b) {
+		t.Fatalf("timestamp cursor was not preserved when known count matched: %+v", evs)
+	}
+
+	// Rewritten history that dropped commits never emits a negative delta.
+	evs = bucketByDay("r", []time.Time{day1a}, day2, map[string]int{ActivityDay(day1a): 2})
+	if len(evs) != 0 {
+		t.Fatalf("dropped history must not emit events: %+v", evs)
+	}
+}
+
+// Git commit timestamps are second-granularity: a follow-up commit landing in
+// the same second as the last scan's newest commit is invisible to the
+// timestamp cursor alone. The recorded day counts must catch it.
+func TestScanCatchesSameSecondCommit(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "quick")
+	initRepo(t, repo)
+	ts := time.Date(2024, 3, 1, 10, 0, 0, 0, time.UTC)
+	commitAt(t, repo, ts, "main.go", "package main\n")
+
+	known := Known{
+		Announced: true,
+		LastTS:    ts,
+		DayCounts: map[string]int{ActivityDay(ts): 1},
+	}
+	commitAt(t, repo, ts, "main.go", "package main\n// progress\n")
+
+	evs, err := Scan(repo, known, ts.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var acts []events.Event
+	for _, e := range evs {
+		if e.Kind == events.KindActivity {
+			acts = append(acts, e)
+		}
+	}
+	if len(acts) != 1 || acts[0].Commits != 1 || !acts[0].TS.Equal(ts) {
+		t.Fatalf("same-second commit not caught, activity = %+v", acts)
+	}
+
+	// A rescan with the second commit recorded stays quiet.
+	known.DayCounts[ActivityDay(ts)] = 2
+	evs, err = Scan(repo, known, ts.Add(2*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range evs {
+		if e.Kind == events.KindActivity {
+			t.Fatalf("recorded commits were re-emitted: %+v", e)
+		}
 	}
 }
 
