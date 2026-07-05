@@ -869,6 +869,7 @@ func (m Model) confirmKey(k string) (tea.Model, tea.Cmd) {
 	switch k {
 	case "y", "Y":
 		if m.scanning {
+			m.toast("the woods are being walked · a moment")
 			return m, nil // the woods are being walked; rebuild waits for it
 		}
 		if m.focus != nil && m.focus.Town.Path != "" {
