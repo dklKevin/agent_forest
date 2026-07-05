@@ -38,6 +38,7 @@ The inspect panel names each building's component and stage; the forest itself s
 - **The honesty layer.**
   A town you have stopped tending is slowly, beautifully reclaimed by the forest.
   A commit revives it through smoke, paths, lamplight, and work left out.
+  Unfinished local work - a dirty tree, a checked-out branch, an extra worktree - pitches a small camp by the hearth, and the camp breaks the moment the work lands or is put away.
   Laying it to rest turns it into a monument, with a short epitaph carved if you leave one.
   A long-dead town decays to ruins, but it never disappears.
 - **Numberless by default.**

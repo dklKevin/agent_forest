@@ -119,11 +119,7 @@ func main() {
 	var towns []*model.Town
 	var demoEvents []events.Event
 	if demoMode {
-		demoEvents = demo.Events(*seed, now)
-		repos := events.Reduce(demoEvents)
-		for _, r := range repos {
-			towns = append(towns, model.NewTown(r, r.Finished))
-		}
+		towns, demoEvents = demo.Towns(*seed, now)
 	} else {
 		towns = a.Towns()
 	}

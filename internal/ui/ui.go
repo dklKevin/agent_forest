@@ -508,7 +508,7 @@ func (m Model) scanDone(msg scanDoneMsg) (tea.Model, tea.Cmd) {
 		// closed, so the pulse runs even when this scan found nothing new
 		// itself - and even when the scan failed, the log on disk still
 		// tells the story.
-		if msg.err == nil && msg.rep.NewEvents > 0 {
+		if msg.err == nil && (msg.rep.NewEvents > 0 || msg.rep.OccupancyShift) {
 			m.rebuildWorld()
 		}
 		m.beginPulse()
@@ -568,6 +568,13 @@ func (m Model) scanDone(msg scanDoneMsg) (tea.Model, tea.Cmd) {
 			m.toast(fmt.Sprintf("%d towns stir", len(revived)))
 		case msg.kind == scanRefresh:
 			m.toast(fmt.Sprintf("refreshed · %d towns grew", msg.rep.Changed))
+		}
+	} else if msg.rep.OccupancyShift {
+		// No history landed, but a camp pitched or broke: rebuild so the
+		// mark tracks the working tree. Camps are quiet; no toast.
+		m.rebuildWorld()
+		if msg.kind == scanRefresh {
+			m.toast("refreshed · nothing new")
 		}
 	} else if msg.kind == scanRefresh {
 		m.toast("refreshed · nothing new")
@@ -1216,6 +1223,10 @@ func (m Model) drawInspect() {
 		{fmt.Sprintf("%s commits · %s", commas(t.TotalCommits), plural(len(t.Tags), "release")), 150, 0},
 		{"last tended " + ago(t.Idle(m.now)), 150, 0},
 		{model.StageLine(model.StageOf(d), t.Finished), 175, 60},
+	}
+	// The camp: one quiet line while the working tree holds unfinished work.
+	if !t.Finished && t.Occupancy.Occupied() {
+		lines = append(lines, line{t.Occupancy.Line(), 150, 0})
 	}
 	// The carved epitaph: the user's own words, read only here. The map
 	// stays silent; the monument just stands.

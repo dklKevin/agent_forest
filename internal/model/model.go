@@ -186,6 +186,36 @@ func IdleForDecay(d float64) time.Duration {
 	return time.Duration(days * 24 * float64(time.Hour))
 }
 
+// Occupancy is the town's current working state, read live from the
+// repository at scan time. It is presence, not history: never an event,
+// never persisted, never folded into stored state. Each scan derives it
+// fresh, so a camp can only stand while the working tree actually holds
+// unfinished work right now - a stale camp cannot haunt a town.
+type Occupancy struct {
+	Dirty     bool   // uncommitted changes in the working tree
+	Branch    string // checked-out non-default branch; empty otherwise
+	Worktrees int    // linked worktrees beyond the main one
+}
+
+// Occupied reports whether anyone is visibly at work in the town.
+func (o Occupancy) Occupied() bool {
+	return o.Dirty || o.Branch != "" || o.Worktrees > 0
+}
+
+// Line is the one quiet inspect line an occupied town earns: lowercase,
+// numberless, the branch name the only identifier worth showing.
+func (o Occupancy) Line() string {
+	switch {
+	case o.Branch != "":
+		return "a camp by the path · work under way on " + o.Branch
+	case o.Worktrees > 0:
+		return "a camp by the path · work under way in another clearing"
+	case o.Dirty:
+		return "a camp by the path · unfinished work at the hearth"
+	}
+	return ""
+}
+
 // Town is one repository as a place in the forest.
 type Town struct {
 	*events.RepoState
@@ -194,6 +224,9 @@ type Town struct {
 	// state (or the demo cast) at build. The UI flips it in place when a
 	// ceremony completes so the world need not be rebuilt mid-moment.
 	Finished bool
+	// Occupancy is the working state read at the latest scan: display state
+	// only, rebuilt with the world, never persisted.
+	Occupancy Occupancy
 	// IdleOverride, when set, replaces the real idle time. It exists for the
 	// neglect preview so stages can be seen without waiting real days.
 	IdleOverride *time.Duration

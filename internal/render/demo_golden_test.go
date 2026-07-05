@@ -6,10 +6,8 @@ import (
 
 	"github.com/dklKevin/agentforest/internal/canvas"
 	"github.com/dklKevin/agentforest/internal/demo"
-	"github.com/dklKevin/agentforest/internal/events"
 	"github.com/dklKevin/agentforest/internal/forest"
 	"github.com/dklKevin/agentforest/internal/goldentest"
-	"github.com/dklKevin/agentforest/internal/model"
 	"github.com/dklKevin/agentforest/internal/render"
 )
 
@@ -28,13 +26,10 @@ const (
 )
 
 // demoWorld builds the demo forest exactly as the CLI does, but with a pinned
-// reference instant.
+// reference instant. Going through demo.Towns keeps the cast's display-only
+// occupancy in the goldens too, so winterwell's camp is pinned art.
 func demoWorld(seed uint64, now time.Time) *forest.World {
-	repos := events.Reduce(demo.Events(seed, now))
-	var towns []*model.Town
-	for _, r := range repos {
-		towns = append(towns, model.NewTown(r, r.Finished))
-	}
+	towns, _ := demo.Towns(seed, now)
 	return forest.Build(seed, towns)
 }
 

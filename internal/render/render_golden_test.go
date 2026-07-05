@@ -198,3 +198,63 @@ func TestEmptyForestGolden(t *testing.T) {
 	w := forest.Build(lcSeed, nil)
 	renderFixture(t, "empty_forest", w, "")
 }
+
+// TestOccupancyCampGolden pins the occupancy mark: the small tent and fire
+// pitched by the hearth while the working tree holds unfinished work, plus
+// the second tent parallel worktrees add.
+func TestOccupancyCampGolden(t *testing.T) {
+	town := plainTown("cedarhold", 120, 4, 0, fixedNow)
+	town.Occupancy = model.Occupancy{Dirty: true, Branch: "wip"}
+	w := forest.Build(lcSeed, []*model.Town{town})
+	renderFixture(t, "occupancy_camp", w, "cedarhold")
+
+	town.Occupancy.Worktrees = 1
+	renderFixture(t, "occupancy_camp_parallel", w, "cedarhold")
+}
+
+// The camp is presence, not layout: whether a town is occupied must not move
+// a single tree, building, or fence - the mark alone appears and breaks.
+func TestOccupancyNeverMovesTheTown(t *testing.T) {
+	quiet := plainTown("cedarhold", 120, 4, 0.37, fixedNow)
+	busy := plainTown("cedarhold", 120, 4, 0.37, fixedNow)
+	busy.Occupancy = model.Occupancy{Dirty: true}
+	wq := forest.Build(lcSeed, []*model.Town{quiet})
+	wb := forest.Build(lcSeed, []*model.Town{busy})
+	if wq.Width != wb.Width || wq.Sites[0].SignX != wb.Sites[0].SignX || wq.Sites[0].CampX != wb.Sites[0].CampX {
+		t.Fatal("occupancy changed the town's layout")
+	}
+	snap := func(w *forest.World) string {
+		out, err := render.RenderSnapshot(w, render.SnapshotOpts{
+			Width: lcW, Height: lcH, At: "cedarhold", T: snapT,
+			Now: fixedNow, Profile: canvas.NoColor,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	if snap(wq) == snap(wb) {
+		t.Fatal("an occupied town rendered no camp")
+	}
+}
+
+// A monument is still: a finished town never shows a camp, whatever the
+// working tree holds.
+func TestOccupancyCampStaysOffMonuments(t *testing.T) {
+	kept := settlementTown("harborfold", true, fixedNow)
+	occupied := settlementTown("harborfold", true, fixedNow)
+	occupied.Occupancy = model.Occupancy{Dirty: true, Branch: "wip", Worktrees: 2}
+	snap := func(town *model.Town) string {
+		out, err := render.RenderSnapshot(forest.Build(lcSeed, []*model.Town{town}), render.SnapshotOpts{
+			Width: lcW, Height: lcH, At: "harborfold", T: snapT,
+			Now: fixedNow, Profile: canvas.NoColor,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	if snap(kept) != snap(occupied) {
+		t.Fatal("a finished town showed a camp")
+	}
+}
