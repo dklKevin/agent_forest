@@ -868,6 +868,9 @@ func (m Model) connectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) confirmKey(k string) (tea.Model, tea.Cmd) {
 	switch k {
 	case "y", "Y":
+		if m.scanning {
+			return m, nil // the woods are being walked; rebuild waits for it
+		}
 		if m.focus != nil && m.focus.Town.Path != "" {
 			name, path := m.focus.Town.Name, m.focus.Town.Path
 			m.app.Settings.SetExcluded(path, true)

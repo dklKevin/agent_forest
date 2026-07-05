@@ -30,7 +30,10 @@ type App struct {
 
 	// occupancy is each repo's working state as of the latest scan: in
 	// memory only, by design. It never touches the event log or settings, so
-	// a camp can only exist while a scan just saw the work standing.
+	// a camp can only exist while a scan just saw the work standing. The scan
+	// goroutine writes and prunes it while the UI goroutine reads it through
+	// Towns(); occMu guards every one of those accesses.
+	occMu     sync.Mutex
 	occupancy map[string]gitscan.Occupancy
 }
 
@@ -95,18 +98,35 @@ func (a *App) Connected() bool {
 // folded from the log's finish/unfinish events.
 func (a *App) Towns() []*model.Town {
 	repos := events.Reduce(a.Events)
+	occ := a.occupancySnapshot()
 	towns := make([]*model.Town, 0, len(repos))
 	for _, r := range repos {
 		if r.Path != "" && a.Settings.IsExcluded(r.Path) {
 			continue
 		}
 		t := model.NewTown(r, r.Finished)
-		if occ, ok := a.occupancy[r.Path]; ok {
-			t.Occupancy = model.Occupancy{Dirty: occ.Dirty, Branch: occ.Branch, Worktrees: occ.Worktrees}
+		if o, ok := occ[r.Path]; ok {
+			t.Occupancy = model.Occupancy{Dirty: o.Dirty, Branch: o.Branch, Worktrees: o.Worktrees}
 		}
 		towns = append(towns, t)
 	}
 	return towns
+}
+
+// occupancySnapshot copies the occupancy map under occMu, so the map is never
+// read while the scan goroutine writes or prunes it. The lock is held only for
+// the copy, never across the town-building loop or any git or store I/O.
+func (a *App) occupancySnapshot() map[string]gitscan.Occupancy {
+	a.occMu.Lock()
+	defer a.occMu.Unlock()
+	if len(a.occupancy) == 0 {
+		return nil
+	}
+	snap := make(map[string]gitscan.Occupancy, len(a.occupancy))
+	for k, v := range a.occupancy {
+		snap[k] = v
+	}
+	return snap
 }
 
 // EpitaphMaxRunes is the carving limit. An epitaph is carved, not written:
@@ -254,12 +274,14 @@ func (a *App) Reconcile(now time.Time) (ScanReport, error) {
 	for _, r := range kept {
 		keptSet[r] = true
 	}
+	a.occMu.Lock()
 	for path := range a.occupancy {
 		if !keptSet[path] {
 			delete(a.occupancy, path)
 			rep.OccupancyShift = true
 		}
 	}
+	a.occMu.Unlock()
 	return rep, err
 }
 
@@ -298,6 +320,7 @@ func (a *App) scan(repos []string, now time.Time) (ScanReport, error) {
 	}
 	wg.Wait()
 
+	a.occMu.Lock()
 	if a.occupancy == nil {
 		a.occupancy = map[string]gitscan.Occupancy{}
 	}
@@ -316,6 +339,7 @@ func (a *App) scan(repos []string, now time.Time) (ScanReport, error) {
 			fresh = append(fresh, r.evs...)
 		}
 	}
+	a.occMu.Unlock()
 	if len(fresh) > 0 {
 		if err := store.AppendEvents(a.Dir, fresh); err != nil {
 			return rep, err
