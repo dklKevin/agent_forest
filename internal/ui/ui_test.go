@@ -405,3 +405,221 @@ func TestUnfinishSaveErrorLeavesTownFinished(t *testing.T) {
 		t.Fatal("failed unfinish erased the carving")
 	}
 }
+
+// The guidebook opens from the forest or from inspect on b, and b steps back
+// to wherever it was opened from; esc always returns to the forest.
+func TestGuidebookOpensFromForestAndInspect(t *testing.T) {
+	m := uiModel(t, uiTown("keepsake", false, "", time.Now()))
+	m = press(t, m, runes("b"))
+	if m.mode != guidebookView {
+		t.Fatalf("b on the map should open the guidebook, mode=%v", m.mode)
+	}
+	m = press(t, m, runes("b"))
+	if m.mode != roam {
+		t.Fatalf("b from a map-opened guidebook should return to the forest, mode=%v", m.mode)
+	}
+	m = press(t, m, runes("i"))
+	m = press(t, m, runes("b"))
+	if m.mode != guidebookView {
+		t.Fatalf("b from inspect should open the guidebook, mode=%v", m.mode)
+	}
+	m = press(t, m, runes("b"))
+	if m.mode != inspect {
+		t.Fatalf("b from an inspect-opened guidebook should step back to inspect, mode=%v", m.mode)
+	}
+	m = press(t, m, runes("b"))
+	m = press(t, m, tea.KeyMsg{Type: tea.KeyEscape})
+	if m.mode != roam {
+		t.Fatalf("esc should leave the guidebook for the forest, mode=%v", m.mode)
+	}
+}
+
+// A town with no readable papers - a demo town, a vanished repo - still gets
+// a quiet page instead of an error or an empty frame.
+func TestGuidebookQuietWithoutPages(t *testing.T) {
+	m := uiModel(t, uiTown("keepsake", false, "", time.Now()))
+	m = press(t, m, runes("b"))
+	out := m.View()
+	for _, want := range []string{"guidebook · keepsake", "no guidebook pages yet"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("pageless guidebook missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// A connected repository's guidebook reads the town's own papers: the
+// README's first words, the shelf of notable pages, and work underway off
+// the default branch - all from local files alone.
+func TestGuidebookReadsTheTownsOwnPages(t *testing.T) {
+	dir := t.TempDir()
+	files := map[string]string{
+		"README.md": "# keepsake\n\n[![b](u)](v)\n\nA quiet keepsake forest for the terminal.\n",
+		"LICENSE":   "MIT",
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "docs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gd := filepath.Join(dir, ".git", "refs", "remotes", "origin")
+	if err := os.MkdirAll(gd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".git", "HEAD"), []byte("ref: refs/heads/harvest\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gd, "HEAD"), []byte("ref: refs/remotes/origin/main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := uiModel(t, uiRepoTown("keepsake", dir, false, "", time.Now()))
+	m = press(t, m, runes("b"))
+	out := m.View()
+	for _, want := range []string{
+		"guidebook · keepsake",
+		"A quiet keepsake forest for the terminal.",
+		"pages kept · readme · license · docs",
+		"work underway on harvest",
+		"planted",
+		"last tended",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("guidebook missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "no guidebook pages yet") {
+		t.Fatal("a town with pages must not claim it has none")
+	}
+}
+
+// The guidebook speaks in words, never percentages or counts: the mix reads
+// as prose and the settlement as named landmarks.
+func TestGuidebookSpeaksInWordsNotNumbers(t *testing.T) {
+	now := time.Now()
+	rs := &events.RepoState{
+		Name: "keepsake",
+		Mix:  map[string]float64{"go": 0.81, "shell": 0.12, "html": 0.07},
+		Components: map[string]*events.ComponentState{
+			"engine": {Name: "engine", Path: "engine", Bytes: 900_000, Files: 40, LastTS: now},
+			"server": {Name: "server", Path: "server", Bytes: 500_000, Files: 30, LastTS: now},
+			"store":  {Name: "store", Path: "store", Bytes: 200_000, Files: 12, LastTS: now},
+			"tests":  {Name: "tests", Path: "tests", Bytes: 150_000, Files: 25, LastTS: now},
+			"docs":   {Name: "docs", Path: "docs", Bytes: 90_000, Files: 9, LastTS: now},
+		},
+	}
+	rs.TotalCommits = 320
+	rs.FirstTS = now.Add(-2 * 365 * 24 * time.Hour)
+	rs.LastTS = now
+	m := uiModel(t, model.NewTown(rs, false))
+	m = press(t, m, runes("b"))
+	out := m.View()
+	for _, want := range []string{
+		"mostly go · some shell · a little html",
+		"the engine barn · a watchtower · a schoolhouse · more roofs besides",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("guidebook missing %q:\n%s", want, out)
+		}
+	}
+	for _, stray := range []string{"81", "0.8", "%", "320"} {
+		if strings.Contains(out, stray) {
+			t.Fatalf("guidebook leaked a number %q:\n%s", stray, out)
+		}
+	}
+}
+
+// A monument's guidebook says so plainly.
+func TestGuidebookMonumentState(t *testing.T) {
+	m := uiModel(t, uiTown("keepsake", true, "kept words", time.Now()))
+	m = press(t, m, runes("b"))
+	if out := m.View(); !strings.Contains(out, "stands as a monument") {
+		t.Fatalf("finished town's guidebook missing the monument line:\n%s", out)
+	}
+}
+
+// Walking town to town while the guidebook is open re-reads the pages for
+// whichever town the eye lands on.
+func TestGuidebookFollowsTheEye(t *testing.T) {
+	now := time.Now()
+	dirs := [2]string{t.TempDir(), t.TempDir()}
+	stories := [2]string{"The first town's own story.", "The second town's own story."}
+	towns := make([]*model.Town, 2)
+	for i := range dirs {
+		if err := os.WriteFile(filepath.Join(dirs[i], "README.md"), []byte(stories[i]+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		towns[i] = uiRepoTown("town"+string(rune('a'+i)), dirs[i], false, "", now)
+	}
+	m := New(Config{World: forest.Build(5, towns), Demo: true})
+	m.w, m.h = 120, 40
+	m.canv = canvas.New(m.w, m.h, canvas.NoColor)
+	m.ready = true
+	m.now = now
+	m.focus = m.world.Sites[0]
+	m = press(t, m, runes("b"))
+	if out := m.View(); !strings.Contains(out, stories[0]) {
+		t.Fatalf("guidebook missing the first town's story:\n%s", out)
+	}
+
+	// Land the camera on the second town and let a tick move the eye.
+	s2 := m.world.Sites[1]
+	m.cam = float64(s2.SignX) - m.dotW()/2
+	m.target = m.cam
+	m = press(t, m, tickMsg(now))
+	if m.focus != s2 {
+		t.Fatalf("the eye did not land on the second town")
+	}
+	if out := m.View(); !strings.Contains(out, stories[1]) {
+		t.Fatalf("guidebook did not follow the eye to the second town:\n%s", out)
+	}
+}
+
+// The help panel documents the guidebook key.
+func TestHelpDocumentsGuidebook(t *testing.T) {
+	m := uiModel(t, uiTown("keepsake", false, "", time.Now()))
+	m.mode = helpView
+	if out := m.View(); !strings.Contains(out, "guidebook  b") {
+		t.Fatalf("help panel missing the guidebook key:\n%s", out)
+	}
+}
+
+// Demo towns have no readable repository behind them: the guidebook still
+// opens with the quiet no-pages line while the landmarks and present state,
+// which come from the world itself, read as usual.
+func TestDemoGuidebookDegradesGracefully(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	evs := demo.Events(5, now)
+	repos := events.Reduce(evs)
+	towns := make([]*model.Town, 0, len(repos))
+	for _, r := range repos {
+		towns = append(towns, model.NewTown(r, r.Finished))
+	}
+	m := New(Config{World: forest.Build(5, towns), Demo: true, Events: evs})
+	m.w, m.h = 120, 40
+	m.canv = canvas.New(m.w, m.h, canvas.NoColor)
+	m.ready = true
+	m.now = now
+	for _, s := range m.world.Sites {
+		if s.Town.Name == "winterwell" {
+			m.focus = s
+			break
+		}
+	}
+	m = press(t, m, runes("b"))
+	out := m.View()
+	for _, want := range []string{
+		"guidebook · winterwell",
+		"no guidebook pages yet",
+		"mostly go · some shell · a little html",
+		"the engine barn · a watchtower · a schoolhouse · more roofs besides",
+		"planted",
+		"last tended",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("demo guidebook missing %q:\n%s", want, out)
+		}
+	}
+}

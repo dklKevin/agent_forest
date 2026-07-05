@@ -1,12 +1,14 @@
 // Package ui is the interactive shell: roaming the forest, inspecting towns,
-// reading a town's almanac (its memoir), previewing the years of neglect,
-// connecting roots, and help. All overlays are drawn onto the same canvas as
-// the world, so there is exactly one visual pipeline.
+// reading a town's almanac (its memoir) or guidebook (its own pages),
+// previewing the years of neglect, connecting roots, and help. All overlays
+// are drawn onto the same canvas as the world, so there is exactly one
+// visual pipeline.
 package ui
 
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -19,6 +21,7 @@ import (
 	"github.com/dklKevin/agentforest/internal/events"
 	"github.com/dklKevin/agentforest/internal/forest"
 	"github.com/dklKevin/agentforest/internal/gitscan"
+	"github.com/dklKevin/agentforest/internal/guidebook"
 	"github.com/dklKevin/agentforest/internal/model"
 )
 
@@ -61,8 +64,9 @@ type mode int
 const (
 	roam mode = iota
 	inspect
-	almanacView // the town's memoir, one deliberate keypress past inspect
-	preview     // the neglect preview: scrub years of decay ahead
+	almanacView   // the town's memoir, one deliberate keypress past inspect
+	guidebookView // the town's own pages, read from its files alone
+	preview       // the neglect preview: scrub years of decay ahead
 	helpView
 	connectInput
 	confirmExclude
@@ -168,6 +172,10 @@ type Model struct {
 
 	epitaph      string      // the line being carved in the threshold panel
 	ceremonyAnim *finishAnim // the laying-to-rest in progress
+
+	book     guidebook.Pages // the focused town's papers, read when the guidebook opens
+	bookFor  string          // which town the pages were read for (path + name)
+	bookFrom mode            // where b was pressed, so closing steps back there
 
 	evs []events.Event // the demo world's log; the almanac's source when demo
 }
@@ -379,6 +387,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cam, m.vel = m.target, 0
 		}
 		m.focus = m.world.NearestSite(m.cam + m.dotW()/2)
+		if m.mode == guidebookView && m.focus != nil {
+			// The guidebook follows the eye like every overlay; the pages are
+			// re-read only when the walk actually lands on another town.
+			if key := bookKey(m.focus.Town); key != m.bookFor {
+				m.book, m.bookFor = guidebook.Read(m.focus.Town.Path), key
+			}
+		}
 		m.stepRevives()
 		m.stepCeremony()
 		var cmd tea.Cmd
@@ -746,6 +761,17 @@ func (m Model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else if m.mode == almanacView {
 			m.mode = inspect
 		}
+	case "b":
+		// The guidebook: the town explains itself from its own pages. It
+		// opens from the forest or from inspect and closes back to the same
+		// place; the pages are read from local files the moment it opens.
+		if m.mode == guidebookView {
+			m.mode = m.bookFrom
+		} else if (m.mode == roam || m.mode == inspect) && m.focus != nil {
+			m.bookFrom = m.mode
+			m.book, m.bookFor = guidebook.Read(m.focus.Town.Path), bookKey(m.focus.Town)
+			m.mode = guidebookView
+		}
 	case "d":
 		if m.mode == preview {
 			m.mode = roam
@@ -1077,6 +1103,8 @@ func (m Model) View() string {
 		m.drawInspect()
 	case almanacView:
 		m.drawAlmanac()
+	case guidebookView:
+		m.drawGuidebook()
 	case preview:
 		m.drawPreview()
 	case helpView:
@@ -1262,6 +1290,173 @@ func (m Model) drawAlmanac() {
 	m.panel(lines)
 }
 
+// bookKey identifies the town whose pages are loaded: the path for real
+// repositories, the name besides so pathless towns still read as distinct
+// places.
+func bookKey(t *model.Town) string { return t.Path + "\x00" + t.Name }
+
+// drawGuidebook is the town's self-introduction: what this place is in the
+// README's own first words, the landmarks, the present state, and which
+// pages sit on the shelf. Everything is read from local files already in the
+// repository; a town with no readable papers still gets a quiet page.
+func (m Model) drawGuidebook() {
+	if m.focus == nil {
+		return
+	}
+	t := m.focus.Town
+	lines := []line{{"guidebook · " + t.Name, 230, 235}, {"", 0, 0}}
+	if m.book.Intro != "" {
+		w := m.w - 10
+		if w > 64 {
+			w = 64
+		}
+		for _, s := range wrapWords(m.book.Intro, w) {
+			lines = append(lines, line{s, 185, 0})
+		}
+	} else {
+		lines = append(lines, line{"no guidebook pages yet · the town tells its story in shape alone", 150, 0})
+	}
+	lines = append(lines, line{"", 0, 0})
+	if s := mixLine(t.Mix); s != "" {
+		lines = append(lines, line{s, 150, 0})
+	}
+	if s := landmarkLine(t.Buildings()); s != "" {
+		lines = append(lines, line{s, 150, 0})
+	}
+	var present []string
+	if !t.FirstTS.IsZero() {
+		present = append(present, "planted "+almanac.MonthYear(t.FirstTS))
+	}
+	if !t.LastTS.IsZero() {
+		present = append(present, "last tended "+ago(t.Idle(m.now)))
+	}
+	if len(present) > 0 {
+		lines = append(lines, line{strings.Join(present, " · "), 150, 0})
+	}
+	if m.book.Branch != "" {
+		lines = append(lines, line{"work underway on " + m.book.Branch, 150, 0})
+	}
+	if t.Finished {
+		lines = append(lines, line{model.StageLine(model.Tended, true), 175, 60})
+	}
+	if len(m.book.Notable) > 0 {
+		lines = append(lines, line{"pages kept · " + strings.Join(m.book.Notable, " · "), 135, 0})
+	}
+	back := "b close"
+	if m.bookFrom == inspect {
+		back = "b back to inspect"
+	}
+	lines = append(lines, line{"", 0, 0}, line{back + " · esc the forest", 115, 0})
+	m.panel(lines)
+}
+
+// mixLine tells the language mix in words - the guidebook never charts
+// percentages: "mostly go · some shell · a little html".
+func mixLine(mix map[string]float64) string {
+	type kv struct {
+		k string
+		v float64
+	}
+	var all []kv
+	for k, v := range mix {
+		all = append(all, kv{k, v})
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].v != all[j].v {
+			return all[i].v > all[j].v
+		}
+		return all[i].k < all[j].k
+	})
+	if len(all) == 0 {
+		return ""
+	}
+	if all[0].v >= 0.95 {
+		return "built of " + all[0].k + " alone"
+	}
+	var parts []string
+	if all[0].v >= 0.5 {
+		parts = append(parts, "mostly "+all[0].k)
+	} else {
+		parts = append(parts, "a mix, "+all[0].k+" foremost")
+	}
+	for _, e := range all[1:] {
+		if len(parts) >= 3 {
+			break
+		}
+		switch {
+		case e.v >= 0.10:
+			parts = append(parts, "some "+e.k)
+		case e.v >= 0.03:
+			parts = append(parts, "a little "+e.k)
+		}
+	}
+	return strings.Join(parts, " · ")
+}
+
+// landmarkLine names the settlement in words: the barn that anchors it, the
+// watchtower and schoolhouse when they stand, and the rest only as roofs
+// besides - the guidebook counts nothing.
+func landmarkLine(bs []model.Building) string {
+	if len(bs) == 0 {
+		return ""
+	}
+	var parts []string
+	rest := 0
+	watch, school := false, false
+	for _, b := range bs {
+		switch b.Form {
+		case model.FormBarn:
+			parts = append(parts, "the "+b.Name+" barn")
+		case model.FormWatchtower:
+			watch = true
+		case model.FormSchoolhouse:
+			school = true
+		default:
+			rest++
+		}
+	}
+	if watch {
+		parts = append(parts, "a watchtower")
+	}
+	if school {
+		parts = append(parts, "a schoolhouse")
+	}
+	switch {
+	case len(parts) == 0:
+		return ""
+	case rest == 1:
+		parts = append(parts, "one more roof besides")
+	case rest > 1:
+		parts = append(parts, "more roofs besides")
+	}
+	return strings.Join(parts, " · ")
+}
+
+// wrapWords folds prose onto panel lines at width w, breaking on spaces; a
+// word longer than a whole line is left for the panel's own trim.
+func wrapWords(s string, w int) []string {
+	if w < 8 {
+		w = 8
+	}
+	var out []string
+	cur := ""
+	for _, word := range strings.Fields(s) {
+		switch {
+		case cur == "":
+			cur = word
+		case len([]rune(cur))+1+len([]rune(word)) <= w:
+			cur += " " + word
+		default:
+			out = append(out, cur)
+			cur = word
+		}
+	}
+	if cur != "" {
+		out = append(out, cur)
+	}
+	return out
+}
+
 func (m Model) drawPreview() {
 	if m.labbed == nil {
 		return
@@ -1363,6 +1558,7 @@ func (m Model) drawHelp() {
 		{"towns      tab / shift+tab · g oldest · G newest", 150, 0},
 		{"inspect    enter or i · numbers live here only", 150, 0},
 		{"almanac    a while inspecting · the town's memoir", 150, 0},
+		{"guidebook  b · the town's own pages, read from its files", 150, 0},
 		{"finished   f · lay a town to rest as a monument", 150, 0},
 		{"foresee    d · preview the years of neglect", 150, 0},
 		{"connect    c · add a root full of repositories", 150, 0},
