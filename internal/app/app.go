@@ -339,12 +339,12 @@ func (a *App) scan(repos []string, now time.Time, pruneMissing bool) (ScanReport
 
 	var fresh []events.Event
 	for _, r := range results {
-		if r.fp != "" {
-			rep.Fingerprints[r.repo] = r.fp
-		}
 		if r.err != nil {
 			rep.Errors = append(rep.Errors, r.repo+": "+r.err.Error())
 			continue
+		}
+		if r.fp != "" {
+			rep.Fingerprints[r.repo] = r.fp
 		}
 		if len(r.evs) > 0 {
 			rep.Changed++
@@ -366,6 +366,9 @@ func (a *App) scan(repos []string, now time.Time, pruneMissing bool) (ScanReport
 		a.runs = map[string]agentrun.Presence{}
 	}
 	for _, r := range results {
+		if r.err != nil {
+			continue
+		}
 		if a.occupancy[r.repo] != r.occ {
 			rep.OccupancyShift = true
 		}

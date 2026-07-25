@@ -196,7 +196,11 @@ func readWithBudgets(repo string, now time.Time, openLimit, gnhfLimit int64) Pre
 		}
 		return candidates[i].at.After(candidates[j].at)
 	})
-	var found []Presence
+	type result struct {
+		p      Presence
+		causal bool
+	}
+	var found []result
 	for _, item := range candidates {
 		info, err := os.Lstat(item.dir)
 		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
@@ -214,16 +218,19 @@ func readWithBudgets(repo string, now time.Time, openLimit, gnhfLimit int64) Pre
 			return Presence{}
 		}
 		if ok {
-			found = append(found, p)
+			found = append(found, result{p: p, causal: item.provider == ".agentforest"})
 		}
 	}
 	if len(found) == 0 {
 		return Presence{}
 	}
 	sort.SliceStable(found, func(i, j int) bool {
-		return found[i].UpdatedAt.After(found[j].UpdatedAt)
+		if found[i].causal != found[j].causal {
+			return found[i].causal
+		}
+		return found[i].p.UpdatedAt.After(found[j].p.UpdatedAt)
 	})
-	return found[0]
+	return found[0].p
 }
 
 func evidenceRoot(repo, name string) (string, bool) {
@@ -558,6 +565,7 @@ func safeReadFileInfo(path string, budget *readBudget) ([]byte, os.FileInfo, err
 		return nil, nil, err
 	}
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > maxFileBytes {
+		budget.uncertain = true
 		return nil, nil, errors.New("unsafe local evidence file")
 	}
 	f, err := os.Open(path)

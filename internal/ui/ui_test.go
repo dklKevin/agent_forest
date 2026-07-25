@@ -339,6 +339,29 @@ func TestFailedScanDoesNotSeedFingerprintBaseline(t *testing.T) {
 	}
 }
 
+func TestFailedStartupRetriesFullDiscovery(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "new")
+	mkUIRepo(t, repo)
+	a := &app.App{
+		Dir:      t.TempDir(),
+		Settings: &store.Settings{Roots: []string{root}},
+	}
+	m := persistedUIModel(t, uiRepoTown("old", "", false, "", time.Now()), a)
+
+	mm, _ := m.scanDone(scanDoneMsg{kind: scanStartup, err: os.ErrPermission})
+	m = mm.(Model)
+	m.lastPoll = time.Now().Add(-pollEvery)
+	cmd := m.maybePoll()
+	if cmd == nil || !m.scanning {
+		t.Fatal("failed startup did not schedule full discovery retry")
+	}
+	msg := cmd().(scanDoneMsg)
+	if msg.kind != scanRetry || msg.err != nil || msg.rep.NewEvents == 0 {
+		t.Fatalf("full discovery retry = %+v", msg)
+	}
+}
+
 func TestFailedLivePollRetriesUnchangedFingerprint(t *testing.T) {
 	t.Setenv("AGENTFOREST_HOME", t.TempDir())
 	root := t.TempDir()

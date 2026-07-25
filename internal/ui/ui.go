@@ -84,6 +84,7 @@ const (
 	scanConnect                 // onboarding or the c key
 	scanRefresh                 // the r key
 	scanLive                    // fingerprint poll saw repository state change
+	scanRetry
 )
 
 type scanDoneMsg struct {
@@ -164,6 +165,7 @@ type Model struct {
 	startupScan bool   // Init reconciles once to catch up on closed-time commits
 	scanSeq     uint64 // monotonically identifies scans started by this model
 	activeScan  uint64 // only this completion may publish a polling cursor
+	retryFull   bool
 
 	fps         map[string]string // repo path -> cheap change fingerprint
 	lastPoll    time.Time
@@ -254,7 +256,7 @@ func scanCmd(a *app.App, id uint64, kind scanKind, root string, paths []string) 
 					err = e
 				}
 			}
-		default: // startup and manual refresh reconcile everything
+		default: // startup, retry, and manual refresh reconcile everything
 			rep, err = a.Reconcile(now)
 		}
 		return scanDoneMsg{id: id, kind: kind, rep: rep, err: err, root: root, paths: paths}
@@ -448,6 +450,9 @@ func (m *Model) maybePoll() tea.Cmd {
 		return nil
 	}
 	m.lastPoll = time.Now()
+	if m.retryFull {
+		return m.beginScan(scanRetry, "", nil)
+	}
 	var changed []string
 	for _, s := range m.world.Sites {
 		path := s.Town.Path
@@ -533,6 +538,9 @@ func (m Model) scanDone(msg scanDoneMsg) (tea.Model, tea.Cmd) {
 		for path, fp := range msg.rep.Fingerprints {
 			m.fps[path] = fp
 		}
+	}
+	if msg.kind == scanStartup || msg.kind == scanRetry {
+		m.retryFull = msg.err != nil || len(msg.rep.Errors) > 0
 	}
 	if msg.kind == scanConnect {
 		return m.connectDone(msg)

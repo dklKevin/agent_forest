@@ -512,6 +512,47 @@ func TestReconcilePersistenceFailurePublishesNoState(t *testing.T) {
 	}
 }
 
+func TestRepoScanErrorPreservesCursorAndVolatileState(t *testing.T) {
+	t.Setenv("AGENTFOREST_HOME", t.TempDir())
+	root := t.TempDir()
+	repo := filepath.Join(root, "keep")
+	mkRepo(t, repo, time.Now().Add(-time.Hour), "main.go", "package main")
+
+	a, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.ConnectRoot(root, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	before := a.Towns()[0]
+
+	gitIn(t, repo, nil, "checkout", "-q", "-b", "wip")
+	writeRunEvidence(t, repo, time.Now(), "building", "must not publish")
+	ref := filepath.Join(repo, ".git", "refs", "heads", "wip")
+	if err := os.WriteFile(ref, []byte(strings.Repeat("0", 40)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if fp := PollFingerprint(repo); fp == "" {
+		t.Fatal("test setup produced no polling fingerprint")
+	}
+
+	rep, err := a.RescanRepo(repo, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Errors) != 1 {
+		t.Fatalf("scan errors = %v", rep.Errors)
+	}
+	if _, ok := rep.Fingerprints[repo]; ok {
+		t.Fatal("errored repository published its polling cursor")
+	}
+	after := a.Towns()[0]
+	if after.Occupancy != before.Occupancy || after.Run.Available() {
+		t.Fatalf("errored repository published volatile state: before=%+v after=%+v", before, after)
+	}
+}
+
 // Occupancy is ephemeral by design: a relaunch knows nothing of it until a
 // scan reads it again, so a stale camp can never haunt a town from disk.
 func TestOccupancyDoesNotSurviveRelaunch(t *testing.T) {

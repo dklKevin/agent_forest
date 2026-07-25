@@ -298,7 +298,7 @@ func TestCausalNewestRunWinsAcrossProviders(t *testing.T) {
 	}
 	gnhfPath := filepath.Join(repo, ".gnhf", "runs", "touched-stale", "iteration-1.jsonl")
 	put(t, gnhfPath, `{"type":"item.started"}`+"\n")
-	if err := os.Chtimes(gnhfPath, now.Add(-time.Hour), now.Add(-time.Hour)); err != nil {
+	if err := os.Chtimes(gnhfPath, now, now); err != nil {
 		t.Fatal(err)
 	}
 
@@ -329,6 +329,19 @@ func TestOverflowingGNHFRunFailsClosed(t *testing.T) {
 	}
 	if p := Read(repo, now); p.Available() {
 		t.Fatalf("truncated run published a stale phase: %+v", p)
+	}
+}
+
+func TestOversizedEvidenceFileFailsRepositoryClosed(t *testing.T) {
+	repo := t.TempDir()
+	now := time.Now().UTC()
+	put(t, openLog(repo, "otherwise-visible"),
+		event(now.Add(-time.Minute), Testing, `"objective":"must-not-leak"`))
+	put(t, filepath.Join(repo, ".gnhf", "runs", "oversized", "iteration-1.jsonl"),
+		strings.Repeat("x", maxFileBytes+1))
+
+	if p := Read(repo, now); p.Available() {
+		t.Fatalf("oversized provider candidate allowed stale fallback: %+v", p)
 	}
 }
 
