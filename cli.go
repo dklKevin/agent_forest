@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/dklKevin/agentforest/internal/almanac"
 	"github.com/dklKevin/agentforest/internal/app"
@@ -447,7 +448,7 @@ func pluralize(n int, word string) string {
 
 // toonField quotes a value only when it would break the row shape.
 func toonField(s string) string {
-	if strings.ContainsAny(s, ", \"\t") {
+	if strings.ContainsAny(s, ", \"\t") || strings.IndexFunc(s, unicode.IsControl) >= 0 {
 		return fmt.Sprintf("%q", s)
 	}
 	return s

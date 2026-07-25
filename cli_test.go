@@ -117,6 +117,18 @@ func TestRefreshCountsQuickCommitsInSameSecond(t *testing.T) {
 	}
 }
 
+func TestToonFieldEscapesControlRunes(t *testing.T) {
+	for _, value := range []string{"line\nbreak", "escape\x1b[31m", "delete\x7f", "next\u0085line"} {
+		got := toonField(value)
+		if !strings.HasPrefix(got, `"`) || !strings.HasSuffix(got, `"`) {
+			t.Errorf("toonField(%q) = %q, want quoted field", value, got)
+		}
+		if strings.ContainsAny(got, "\n\r\x1b\x7f\u0085") {
+			t.Errorf("toonField(%q) emitted a raw control rune: %q", value, got)
+		}
+	}
+}
+
 // almanacHome seeds a storage home with one town's life and points the app
 // at it.
 func almanacHome(t *testing.T) {

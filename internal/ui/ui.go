@@ -769,9 +769,13 @@ func (m Model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.labbed = nil
 		}
 	case "f":
-		if m.focus != nil {
-			if m.focus.Town.Finished {
-				m.unfinish(m.focus)
+		target := m.focus
+		if m.mode == preview && m.labbed != nil {
+			target = m.labbed
+		}
+		if target != nil {
+			if target.Town.Finished {
+				m.unfinish(target)
 			} else {
 				// The threshold: finishing is a ceremony, never a toggle.
 				m.mode = confirmFinish
@@ -1616,7 +1620,7 @@ func (m Model) drawHelp() {
 		{"connect    c · add a root full of repositories", 150, 0},
 		{"exclude    x · hide the focused town", 150, 0},
 		{"refresh    r · rescan every root now", 150, 0},
-		{"close      esc or q", 150, 0},
+		{"close      esc · q on this and browsing panels", 150, 0},
 		{"quit       q from forest", 150, 0},
 	}
 	m.panel(lines)

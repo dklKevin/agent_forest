@@ -437,6 +437,38 @@ func TestFinishedPreviewReturnsToTheSeasons(t *testing.T) {
 	}
 }
 
+func TestFinishedPreviewReturnTargetsDisplayedTownAfterNavigation(t *testing.T) {
+	now := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+	towns := []*model.Town{
+		uiTown("keepsake", true, "words to keep", now),
+		uiTown("waypoint", true, "other words", now),
+	}
+	m := New(Config{World: forest.Build(5, towns), Demo: true})
+	m.w, m.h = 120, 40
+	m.canv = canvas.New(m.w, m.h, canvas.NoColor)
+	m.ready = true
+	m.now = now
+	m.focus = m.world.Sites[0]
+
+	m = press(t, m, runes("d"))
+	displayed := m.labbed
+	m = press(t, m, tea.KeyMsg{Type: tea.KeyTab})
+	m.cam = m.target
+	m = press(t, m, tickMsg(now))
+	if m.focus == displayed {
+		t.Fatal("navigation did not move focus away from the displayed preview town")
+	}
+	navigated := m.focus
+
+	m = press(t, m, runes("f"))
+	if displayed.Town.Finished {
+		t.Fatal("f did not return the displayed preview town to the seasons")
+	}
+	if !navigated.Town.Finished {
+		t.Fatal("navigation redirected the return mutation to the focused town")
+	}
+}
+
 // almanacModel builds the UI over a world folded from a real event set, the
 // way main.go does for the demo, so the almanac page has a log to read.
 func almanacModel(t *testing.T, evs []events.Event, now time.Time) Model {
@@ -827,11 +859,31 @@ func TestHelpExplainsPanelCloseBeforeQuit(t *testing.T) {
 	m.now = now
 	m.mode = helpView
 	out := m.View()
-	if !strings.Contains(out, "close      esc or q") {
+	if !strings.Contains(out, "close      esc · q on this and browsing panels") {
 		t.Fatalf("help did not explain panel close:\n%s", out)
 	}
 	if !strings.Contains(out, "quit       q from forest") {
 		t.Fatalf("help did not scope quit to the forest:\n%s", out)
+	}
+
+	m.mode = connectInput
+	m.input = ""
+	m = press(t, m, runes("q"))
+	if m.mode != connectInput || m.input != "q" {
+		t.Fatal("q must remain text in the connect panel")
+	}
+
+	m.mode = confirmFinish
+	m.epitaph = ""
+	m = press(t, m, runes("q"))
+	if m.mode != confirmFinish || m.epitaph != "q" {
+		t.Fatal("q must remain text in the finish-confirmation panel")
+	}
+
+	m.mode = ceremony
+	m = press(t, m, runes("q"))
+	if m.mode != ceremony {
+		t.Fatal("q must remain ignored during the ceremony")
 	}
 }
 
