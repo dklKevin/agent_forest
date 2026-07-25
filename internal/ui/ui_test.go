@@ -316,6 +316,29 @@ func TestStartupScanSeedsFirstPollBaseline(t *testing.T) {
 	}
 }
 
+func TestFailedScanDoesNotSeedFingerprintBaseline(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "busy")
+	mkUIRepo(t, repo)
+	town := uiRepoTown("busy", repo, false, "", time.Now())
+	a := &app.App{Dir: t.TempDir(), Settings: &store.Settings{}}
+	m := persistedUIModel(t, town, a)
+	fp := app.PollFingerprint(repo)
+
+	mm, _ := m.scanDone(scanDoneMsg{
+		kind: scanStartup,
+		rep:  app.ScanReport{Fingerprints: map[string]string{repo: fp}},
+		err:  os.ErrPermission,
+	})
+	m = mm.(Model)
+	if _, seeded := m.fps[repo]; seeded {
+		t.Fatal("failed scan published a fingerprint for state it withheld")
+	}
+	m.lastPoll = time.Now().Add(-pollEvery)
+	if cmd := m.maybePoll(); cmd == nil {
+		t.Fatal("failed scan fingerprint suppressed the automatic retry")
+	}
+}
+
 func TestWorkPlaqueOpensOnlyFromInspectAndNamesPhase(t *testing.T) {
 	now := time.Now()
 	town := uiTown("keepsake", false, "", now)

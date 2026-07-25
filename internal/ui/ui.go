@@ -506,8 +506,14 @@ func (m *Model) stepRevives() {
 
 func (m Model) scanDone(msg scanDoneMsg) (tea.Model, tea.Cmd) {
 	m.scanning = false
-	for path, fp := range msg.rep.Fingerprints {
-		m.fps[path] = fp
+	// A persistence failure publishes none of the scan's event, occupancy,
+	// or run state. Do not publish its polling cursor either: keeping the old
+	// fingerprint makes the next poll retry the exact filesystem state that
+	// failed, instead of suppressing it until another unrelated change.
+	if msg.err == nil {
+		for path, fp := range msg.rep.Fingerprints {
+			m.fps[path] = fp
+		}
 	}
 	if msg.kind == scanConnect {
 		return m.connectDone(msg)
