@@ -190,8 +190,8 @@ func IdleForDecay(d float64) time.Duration {
 // Occupancy is the town's current working state, read live from the
 // repository at scan time. It is presence, not history: never an event,
 // never persisted, never folded into stored state. Each scan derives it
-// fresh, so a camp can only stand while the working tree actually holds
-// unfinished work right now - a stale camp cannot haunt a town.
+// fresh, so its camp signal lasts only while the working tree actually holds
+// unfinished work right now.
 type Occupancy struct {
 	Dirty     bool   // uncommitted changes in the working tree
 	Branch    string // checked-out non-default branch; empty otherwise

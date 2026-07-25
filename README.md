@@ -40,7 +40,7 @@ The inspect panel names each building's component and stage; the forest itself s
   A commit revives it through smoke, paths, lamplight, and work left out.
   Unfinished local work - a dirty tree, a branch off the default, an extra worktree - pitches a small camp by the hearth, and the camp breaks the moment the work lands or is put away.
   A fresh in-progress local run can pitch the same camp, while a small shape records planning, building, testing, reviewing, blocked, handed off, or completed without pretending a finished run is still at work.
-  When curated replay evidence exists, a low plaque stands by the path; its words remain behind inspect.
+  When curated replay evidence exists for a living town, a low plaque stands by the path; its words remain behind inspect.
   Laying it to rest turns it into a monument, with a short epitaph carved if you leave one.
   A long-dead town decays to ruins, but it never disappears.
 - **Numberless by default.**
@@ -184,9 +184,9 @@ After an intentional art change, run `make golden` (or `go test ./internal/galle
 
 Everything stays on your machine.
 No telemetry, no analytics, no social features, no leaderboards.
-Local work evidence is read only during foreground scans: no daemon, process
-inspection, network dependency, raw prompt capture, command capture, or output
-capture.
+Local work evidence is read only during foreground scans and explicit replay
+reads: no daemon, process inspection, network dependency, raw prompt capture,
+command capture, or output capture.
 Shareable only because it is beautiful.
 
 ## Status

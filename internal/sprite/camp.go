@@ -1,9 +1,8 @@
-// The occupancy camp: unfinished local work gives a town a visible body. A
-// small canvas tent pitched at the edge of the kept ground, a fire breathing
-// beside it, a thin wisp on the wind - presence read fresh from the working
-// tree each scan, gone the moment the work lands or is put away. Like
-// everything meaning-bearing it is shape, not color: the fire flickers by
-// brightness alone, and the warm accent stays the lantern's.
+// The presence camp: unfinished git work or a fresh, in-progress local run
+// gives a town a visible body. A small canvas tent pitches at the edge of the
+// kept ground, with a fire breathing beside it and a thin wisp on the wind.
+// Like everything meaning-bearing it is shape, not color: the fire flickers
+// by brightness alone, and the warm accent stays the lantern's.
 package sprite
 
 import (
@@ -12,7 +11,7 @@ import (
 	"github.com/dklKevin/agentforest/internal/xnoise"
 )
 
-// Camp is one town's occupancy mark, fully described so drawing is
+// Camp is one town's local-presence mark, fully described so drawing is
 // deterministic frame to frame.
 type Camp struct {
 	Seed    uint64

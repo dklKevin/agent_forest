@@ -303,9 +303,9 @@ func (a *App) RescanRepo(path string, now time.Time) (ScanReport, error) {
 }
 
 // scan runs the git adapter over repos in parallel and appends whatever the
-// log is missing, in deterministic repo order. Each repo's working state is
-// read in the same pass and held in memory only: occupancy rides the scan
-// cadence, never the log.
+// log is missing, in deterministic repo order. Each repo's working state and
+// local run evidence are read in the same pass and held in memory only: both
+// ride the scan cadence, never the log.
 func (a *App) scan(repos []string, now time.Time, pruneMissing bool) (ScanReport, error) {
 	rep := ScanReport{Repos: len(repos), Fingerprints: make(map[string]string, len(repos))}
 	known := KnownByRepo(a.EventsSnapshot())

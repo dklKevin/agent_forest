@@ -86,10 +86,10 @@ type Site struct {
 	Fences    []Fence
 	WellX     int // communal well; 0 means none
 	StakesX   int // release stakes: where the trail leaves the settlement
-	// CampX is where an occupancy camp pitches when the working tree holds
-	// unfinished work. The spot is always laid out - deterministic from
-	// stored state alone - so a camp appearing or breaking never moves a
-	// single tree; only presence decides whether anything is drawn there.
+	// CampX is where current local presence pitches a camp. The spot is always
+	// laid out - deterministic from stored state alone - so a camp appearing
+	// or breaking never moves a single tree; only presence decides whether
+	// anything is drawn there.
 	CampX int
 	BeltW int // settlement belt edges: understory grows inside,
 	BeltE int // old growth stays outside and behind
