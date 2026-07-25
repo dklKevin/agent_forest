@@ -80,6 +80,7 @@ On a later real launch, towns with commits that landed while you were away may b
   On a monument, `f` quietly lights the hearth again; the carved words are kept.
 - `d` preview years of neglect in seconds.
 - In the preview, `+` / `-` shift by day, `<` / `>` by month, `[` / `]` by year, `1`-`6` jump to stages, and `0` restores real time.
+  On a monument's preview, those time controls leave its final view intact; `f` returns to the seasons.
 - `c` connect another root; `x` exclude the focused town; `r` rescan every root.
 - `?` help, `esc` dismisses overlays, `q` quits from the forest.
 
@@ -100,6 +101,7 @@ agentforest unfinish <name|path> light the hearth again (carved words are kept)
 
 Use a full path when duplicate town names collide.
 An epitaph is optional, trimmed to one plain line of at most 40 characters; finishing a monument with new words re-carves it.
+A refresh that finds new history also names the towns that changed.
 Output is structured, and command-specific errors include help when there is an obvious next step.
 Every command answers `--help`.
 

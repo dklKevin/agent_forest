@@ -98,6 +98,66 @@ func mkUIRepo(t *testing.T, dir string) {
 	gitInUI(t, dir, "commit", "-q", "-m", "c")
 }
 
+// A live commit to an already-tended town may not have enough decay to play
+// the revival line, but it still closes the return loop by naming the town
+// that received the new work.
+func TestLiveScanToastsActiveTownCommits(t *testing.T) {
+	now := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+	path := "/tmp/forge"
+	before := []events.Event{
+		{Kind: events.KindRepo, Repo: path, Path: path, Name: "forge", TS: now.Add(-30 * time.Minute)},
+		{Kind: events.KindActivity, Repo: path, TS: now.Add(-30 * time.Minute), Commits: 1},
+		{Kind: events.KindLangs, Repo: path, TS: now.Add(-30 * time.Minute), Mix: map[string]float64{"go": 1}},
+	}
+	after := append([]events.Event{}, before...)
+	after = append(after, events.Event{Kind: events.KindActivity, Repo: path, TS: now, Commits: 1})
+	repos := events.Reduce(before)
+	a := &app.App{Settings: &store.Settings{}, Events: after}
+	m := New(Config{
+		World: forest.Build(5, []*model.Town{model.NewTown(repos[0], false)}),
+		App:   a,
+	})
+	m.now = now
+
+	updated, _ := m.scanDone(scanDoneMsg{
+		kind: scanLive,
+		rep: app.ScanReport{
+			Repos:        1,
+			Changed:      1,
+			ChangedRepos: []string{path},
+			NewEvents:    1,
+		},
+		paths: []string{path},
+	})
+	if got := updated.(Model).status; got != "forge was tended" {
+		t.Fatalf("status = %q, want %q", got, "forge was tended")
+	}
+}
+
+func TestManualRefreshToastUsesSingularTown(t *testing.T) {
+	now := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+	path := "/tmp/forge"
+	before := []events.Event{
+		{Kind: events.KindRepo, Repo: path, Path: path, Name: "forge", TS: now.Add(-30 * time.Minute)},
+		{Kind: events.KindActivity, Repo: path, TS: now.Add(-30 * time.Minute), Commits: 1},
+	}
+	after := append([]events.Event{}, before...)
+	after = append(after, events.Event{Kind: events.KindActivity, Repo: path, TS: now, Commits: 1})
+	repos := events.Reduce(before)
+	m := New(Config{
+		World: forest.Build(5, []*model.Town{model.NewTown(repos[0], false)}),
+		App:   &app.App{Settings: &store.Settings{}, Events: after},
+	})
+	m.now = now
+	updated, _ := m.scanDone(scanDoneMsg{
+		kind: scanRefresh,
+		rep:  app.ScanReport{Changed: 1, NewEvents: 1},
+	})
+	if got := updated.(Model).status; got != "refreshed · 1 town grew" {
+		t.Fatalf("status = %q, want %q", got, "refreshed · 1 town grew")
+	}
+}
+
 // The occupancy line lives in inspect and only while the working tree holds
 // work: one quiet line, the branch name the only identifier shown.
 func TestInspectShowsCampLineWhileOccupied(t *testing.T) {
@@ -217,6 +277,24 @@ func TestInspectShowsActualPlantedMonth(t *testing.T) {
 	}
 }
 
+func TestInspectShortensLongPathInsidePanel(t *testing.T) {
+	path := "/tmp/" + strings.Repeat("nested/", 18) + "forge"
+	now := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+	m := uiModel(t, uiRepoTown("forge", path, false, "", now))
+	m.now = now
+	m.w, m.h = 80, 28
+	m.canv = canvas.New(m.w, m.h, canvas.NoColor)
+	m.mode = inspect
+
+	view := m.View()
+	if strings.Contains(view, path) {
+		t.Fatalf("inspect rendered the full long path instead of shortening it:\n%s", view)
+	}
+	if !strings.Contains(view, "…") || !strings.Contains(view, "forge") {
+		t.Fatalf("inspect did not keep a readable shortened path:\n%s", view)
+	}
+}
+
 // f is a threshold, never a toggle: it opens the panel, the line editor caps
 // the carving, enter begins the passage, and only the passage's end leaves
 // the town standing finished.
@@ -326,6 +404,68 @@ func TestUnfinishIsQuiet(t *testing.T) {
 	}
 	if !strings.Contains(m.status, "the hearth is lit again") {
 		t.Fatalf("missing the quiet line, got %q", m.status)
+	}
+}
+
+// A finished town's neglect preview is a monument page, not a hidden mutable
+// timeline. Returning it to the seasons restores the ordinary controls in
+// place, keeping the completed-town loop legible.
+func TestFinishedPreviewReturnsToTheSeasons(t *testing.T) {
+	now := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+	m := uiModel(t, uiTown("keepsake", true, "words to keep", now))
+	m.now = now
+	m = press(t, m, runes("d"))
+	if m.mode != preview || m.labbed == nil {
+		t.Fatal("d did not open the finished town's preview")
+	}
+	m = press(t, m, runes("6"))
+	if m.labbed.Town.IdleOverride != nil {
+		t.Fatal("finished preview stored a hidden idle override")
+	}
+	if out := m.View(); !strings.Contains(out, "kept monument · f returns to seasons") {
+		t.Fatalf("finished preview did not explain the return path:\n%s", out)
+	}
+
+	m = press(t, m, runes("f"))
+	if m.labbed.Town.Finished {
+		t.Fatal("f did not return the town to the seasons")
+	}
+	out := m.View()
+	if strings.Contains(out, "kept monument") ||
+		!strings.Contains(out, "+/- day   </> month   [/] year   1-6 stages") {
+		t.Fatalf("ordinary preview controls did not return:\n%s", out)
+	}
+}
+
+func TestFinishedPreviewReturnTargetsDisplayedTownAfterNavigation(t *testing.T) {
+	now := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+	towns := []*model.Town{
+		uiTown("keepsake", true, "words to keep", now),
+		uiTown("waypoint", true, "other words", now),
+	}
+	m := New(Config{World: forest.Build(5, towns), Demo: true})
+	m.w, m.h = 120, 40
+	m.canv = canvas.New(m.w, m.h, canvas.NoColor)
+	m.ready = true
+	m.now = now
+	m.focus = m.world.Sites[0]
+
+	m = press(t, m, runes("d"))
+	displayed := m.labbed
+	m = press(t, m, tea.KeyMsg{Type: tea.KeyTab})
+	m.cam = m.target
+	m = press(t, m, tickMsg(now))
+	if m.focus == displayed {
+		t.Fatal("navigation did not move focus away from the displayed preview town")
+	}
+	navigated := m.focus
+
+	m = press(t, m, runes("f"))
+	if displayed.Town.Finished {
+		t.Fatal("f did not return the displayed preview town to the seasons")
+	}
+	if !navigated.Town.Finished {
+		t.Fatal("navigation redirected the return mutation to the focused town")
 	}
 }
 
@@ -710,6 +850,85 @@ func TestHelpDocumentsGuidebook(t *testing.T) {
 	m.mode = helpView
 	if out := m.View(); !strings.Contains(out, "guidebook  b") {
 		t.Fatalf("help panel missing the guidebook key:\n%s", out)
+	}
+}
+
+func TestHelpExplainsPanelCloseBeforeQuit(t *testing.T) {
+	now := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+	m := uiModel(t, uiTown("keepsake", false, "", now))
+	m.now = now
+	m.mode = helpView
+	out := m.View()
+	if !strings.Contains(out, "close      esc · q on this and browsing panels") {
+		t.Fatalf("help did not explain panel close:\n%s", out)
+	}
+	if !strings.Contains(out, "quit       q from forest") {
+		t.Fatalf("help did not scope quit to the forest:\n%s", out)
+	}
+
+	m.mode = connectInput
+	m.input = ""
+	m = press(t, m, runes("q"))
+	if m.mode != connectInput || m.input != "q" {
+		t.Fatal("q must remain text in the connect panel")
+	}
+
+	m.mode = confirmFinish
+	m.epitaph = ""
+	m = press(t, m, runes("q"))
+	if m.mode != confirmFinish || m.epitaph != "q" {
+		t.Fatal("q must remain text in the finish-confirmation panel")
+	}
+
+	m.mode = ceremony
+	m = press(t, m, runes("q"))
+	if m.mode != ceremony {
+		t.Fatal("q must remain ignored during the ceremony")
+	}
+}
+
+// Panel close and town traversal share the same eye: closing an overlay keeps
+// focus, and tab/shift-tab move that focus predictably in either direction.
+func TestPanelCloseAndTownNavigationPreserveFocus(t *testing.T) {
+	now := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+	towns := make([]*model.Town, 8)
+	for i := range towns {
+		towns[i] = uiTown("town"+string(rune('a'+i)), false, "", now.Add(time.Duration(i)*time.Minute))
+	}
+	m := New(Config{World: forest.Build(5, towns), Demo: true})
+	m.w, m.h = 80, 28
+	m.canv = canvas.New(m.w, m.h, canvas.NoColor)
+	m.ready = true
+	m.now = now
+	m.focus = m.world.Sites[2]
+	m.centerOn(m.focus)
+	m.cam = m.target
+
+	m = press(t, m, runes("i"))
+	focused := m.focus
+	m = press(t, m, runes("q"))
+	if m.mode != roam || m.focus != focused {
+		t.Fatal("q did not close the panel back onto the focused town")
+	}
+
+	m = press(t, m, tea.KeyMsg{Type: tea.KeyTab})
+	m.cam = m.target
+	m = press(t, m, tickMsg(now))
+	if m.focus != m.world.Sites[3] {
+		t.Fatal("tab did not move focus to the next town")
+	}
+
+	m = press(t, m, runes("?"))
+	m = press(t, m, runes("q"))
+	if m.mode != roam || m.focus != m.world.Sites[3] {
+		t.Fatal("closing help did not preserve the navigated focus")
+	}
+
+	m = press(t, m, tea.KeyMsg{Type: tea.KeyShiftTab})
+	m.cam = m.target
+	m = press(t, m, tickMsg(now))
+	if m.focus != m.world.Sites[2] {
+		t.Fatal("shift-tab did not return focus to the previous town")
 	}
 }
 

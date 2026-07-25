@@ -227,10 +227,11 @@ func joinOr(list []string, empty string) string {
 
 // ScanReport summarizes one reconcile pass.
 type ScanReport struct {
-	Repos     int      // repositories scanned after excludes are applied
-	Changed   int      // repositories that produced new events
-	NewEvents int      // events appended to the log
-	Errors    []string // per-repo scan failures, "path: reason"
+	Repos        int      // repositories scanned after excludes are applied
+	Changed      int      // repositories that produced new events
+	ChangedRepos []string // repository paths that produced new events
+	NewEvents    int      // events appended to the log
+	Errors       []string // per-repo scan failures, "path: reason"
 	// OccupancyShift reports that some repo's working-state read changed in
 	// this pass, so camps need a world rebuild even when no events landed.
 	OccupancyShift bool
@@ -336,6 +337,7 @@ func (a *App) scan(repos []string, now time.Time) (ScanReport, error) {
 		}
 		if len(r.evs) > 0 {
 			rep.Changed++
+			rep.ChangedRepos = append(rep.ChangedRepos, r.repo)
 			fresh = append(fresh, r.evs...)
 		}
 	}

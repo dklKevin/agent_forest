@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/dklKevin/agentforest/internal/almanac"
 	"github.com/dklKevin/agentforest/internal/app"
@@ -268,9 +269,28 @@ func cmdRefresh() int {
 	} else {
 		fmt.Printf("new: %s across %s\n",
 			pluralize(rep.NewEvents, "event"), pluralize(rep.Changed, "town"))
+		printChangedTowns(a, rep.ChangedRepos)
 	}
 	printScanErrors(rep.Errors)
 	return 0
+}
+
+func printChangedTowns(a *app.App, paths []string) {
+	if len(paths) == 0 {
+		return
+	}
+	namesByPath := map[string]string{}
+	for _, t := range a.Towns() {
+		namesByPath[t.Path] = t.Name
+	}
+	fmt.Printf("changed[%d]{name}:\n", len(paths))
+	for _, path := range paths {
+		name := namesByPath[path]
+		if name == "" {
+			name = pathBase(path)
+		}
+		fmt.Println("  " + toonField(name))
+	}
 }
 
 func cmdSetExcluded(args []string, excluded bool) int {
@@ -428,10 +448,18 @@ func pluralize(n int, word string) string {
 
 // toonField quotes a value only when it would break the row shape.
 func toonField(s string) string {
-	if strings.ContainsAny(s, ", \"\t") {
+	if strings.ContainsAny(s, ", \"\t") || strings.IndexFunc(s, unicode.IsControl) >= 0 {
 		return fmt.Sprintf("%q", s)
 	}
 	return s
+}
+
+func pathBase(path string) string {
+	i := strings.LastIndexAny(path, `/\`)
+	if i >= 0 && i < len(path)-1 {
+		return path[i+1:]
+	}
+	return path
 }
 
 // shortAgo compresses idle time for list output.

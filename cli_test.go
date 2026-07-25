@@ -94,6 +94,9 @@ func TestRefreshCountsQuickCommitsInSameSecond(t *testing.T) {
 	if !regexp.MustCompile(`new: .+ across 1 town\b`).MatchString(out) {
 		t.Fatalf("refresh did not attribute the new history to the town:\n%s", out)
 	}
+	if !strings.Contains(out, "changed[1]{name}:\n  active-app\n") {
+		t.Fatalf("refresh did not name the changed town:\n%s", out)
+	}
 
 	out, code = capture(t, func() int { return runCommand("towns", nil) })
 	if code != 0 {
@@ -111,6 +114,18 @@ func TestRefreshCountsQuickCommitsInSameSecond(t *testing.T) {
 	}
 	if !strings.Contains(out, "new: nothing (the log is current)") {
 		t.Fatalf("second refresh re-emitted recorded history:\n%s", out)
+	}
+}
+
+func TestToonFieldEscapesControlRunes(t *testing.T) {
+	for _, value := range []string{"line\nbreak", "escape\x1b[31m", "delete\x7f", "next\u0085line"} {
+		got := toonField(value)
+		if !strings.HasPrefix(got, `"`) || !strings.HasSuffix(got, `"`) {
+			t.Errorf("toonField(%q) = %q, want quoted field", value, got)
+		}
+		if strings.ContainsAny(got, "\n\r\x1b\x7f\u0085") {
+			t.Errorf("toonField(%q) emitted a raw control rune: %q", value, got)
+		}
 	}
 }
 
