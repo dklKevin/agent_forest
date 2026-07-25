@@ -489,9 +489,12 @@ func safeReadDir(path string, limit int) ([]os.DirEntry, error) {
 	if err != nil || !os.SameFile(info, opened) || !opened.IsDir() {
 		return nil, errors.New("local evidence directory changed while opening")
 	}
-	entries, err := f.ReadDir(limit)
+	entries, err := f.ReadDir(limit + 1)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
+	}
+	if len(entries) > limit {
+		return nil, errors.New("local evidence directory exceeds traversal limit")
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	return entries, nil

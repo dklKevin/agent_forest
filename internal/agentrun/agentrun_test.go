@@ -249,12 +249,20 @@ func TestSafeReadDirKeepsHardTraversalLimit(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		put(t, filepath.Join(dir, fmt.Sprintf("%02d", i)), "x")
 	}
-	entries, err := safeReadDir(dir, 7)
-	if err != nil {
-		t.Fatal(err)
+	if entries, err := safeReadDir(dir, 7); err == nil || entries != nil {
+		t.Fatalf("overflow returned %d entries without failing closed", len(entries))
 	}
-	if len(entries) != 7 {
-		t.Fatalf("entries = %d, want hard limit 7", len(entries))
+}
+
+func TestOverflowingGNHFRunFailsClosed(t *testing.T) {
+	repo := t.TempDir()
+	run := filepath.Join(repo, ".gnhf", "runs", "overflow")
+	for i := 1; i <= maxRunEntries+1; i++ {
+		put(t, filepath.Join(run, fmt.Sprintf("iteration-%d.jsonl", i)),
+			`{"type":"thread.started"}`+"\n")
+	}
+	if p := Read(repo, time.Now().UTC()); p.Available() {
+		t.Fatalf("truncated run published a stale phase: %+v", p)
 	}
 }
 
