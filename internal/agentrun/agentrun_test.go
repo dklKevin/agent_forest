@@ -310,6 +310,27 @@ func TestReadEnforcesAggregateByteBudgetAcrossRuns(t *testing.T) {
 	}
 }
 
+func TestReadBudgetRanksCandidatesAcrossProviders(t *testing.T) {
+	repo := t.TempDir()
+	now := time.Now().UTC()
+	openPath := openLog(repo, "older")
+	gnhfPath := filepath.Join(repo, ".gnhf", "runs", "newer", "iteration-1.jsonl")
+	gnhfLog := `{"type":"item.started"}` + "\n"
+	put(t, openPath, strings.Repeat("x", 64)+"\n")
+	put(t, gnhfPath, gnhfLog)
+	if err := os.Chtimes(openPath, now.Add(-time.Minute), now.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(gnhfPath, now, now); err != nil {
+		t.Fatal(err)
+	}
+
+	p := readWithBudget(repo, now, int64(len(gnhfLog)))
+	if p.Phase != Building || !p.Active {
+		t.Fatalf("older provider exhausted budget before newer evidence: %+v", p)
+	}
+}
+
 func TestFreshnessAndTerminalPhasesDoNotInventOngoingWork(t *testing.T) {
 	now := time.Now().UTC()
 	p := Presence{Phase: Building, Active: true, UpdatedAt: now.Add(-freshFor)}

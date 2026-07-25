@@ -143,13 +143,59 @@ func Read(repo string, now time.Time) Presence {
 }
 
 func readWithBudget(repo string, now time.Time, limit int64) Presence {
-	var found []Presence
 	budget := &readBudget{remaining: limit}
+	type candidate struct {
+		dir      string
+		provider string
+		at       time.Time
+	}
+	var candidates []candidate
 	if root, ok := evidenceRoot(repo, ".agentforest"); ok {
-		found = append(found, readOpenRuns(root, now, budget)...)
+		for _, entry := range recentRunDirsOrEmpty(root) {
+			dir := filepath.Join(root, entry.Name())
+			candidates = append(candidates, candidate{
+				dir: dir, provider: ".agentforest", at: runEvidenceModTime(root, dir),
+			})
+		}
 	}
 	if root, ok := evidenceRoot(repo, ".gnhf"); ok {
-		found = append(found, readGNHFRuns(root, now, budget)...)
+		for _, entry := range recentRunDirsOrEmpty(root) {
+			dir := filepath.Join(root, entry.Name())
+			candidates = append(candidates, candidate{
+				dir: dir, provider: ".gnhf", at: runEvidenceModTime(root, dir),
+			})
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].at.Equal(candidates[j].at) {
+			if candidates[i].provider == candidates[j].provider {
+				return candidates[i].dir < candidates[j].dir
+			}
+			return candidates[i].provider < candidates[j].provider
+		}
+		return candidates[i].at.After(candidates[j].at)
+	})
+	if len(candidates) > maxRuns {
+		candidates = candidates[:maxRuns]
+	}
+
+	var found []Presence
+	for _, item := range candidates {
+		info, err := os.Lstat(item.dir)
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		var p Presence
+		var ok bool
+		switch item.provider {
+		case ".agentforest":
+			p, ok = readOpenRun(item.dir, now, budget)
+		case ".gnhf":
+			p, ok = readGNHFRun(item.dir, now, budget)
+		}
+		if ok {
+			found = append(found, p)
+		}
 	}
 	if len(found) == 0 {
 		return Presence{}
@@ -158,6 +204,14 @@ func readWithBudget(repo string, now time.Time, limit int64) Presence {
 		return found[i].UpdatedAt.After(found[j].UpdatedAt)
 	})
 	return found[0]
+}
+
+func recentRunDirsOrEmpty(root string) []os.DirEntry {
+	entries, err := recentRunDirs(root)
+	if err != nil {
+		return nil
+	}
+	return entries
 }
 
 func evidenceRoot(repo, name string) (string, bool) {
@@ -185,71 +239,69 @@ type openEvent struct {
 	Unresolved   []string `json:"unresolved"`
 }
 
-func readOpenRuns(root string, now time.Time, budget *readBudget) []Presence {
-	return readRunDirs(root, func(dir string) (Presence, bool) {
-		f, err := safeOpen(filepath.Join(dir, "events.jsonl"), budget)
-		if err != nil {
-			return Presence{}, false
-		}
-		defer f.Close()
+func readOpenRun(dir string, now time.Time, budget *readBudget) (Presence, bool) {
+	f, err := safeOpen(filepath.Join(dir, "events.jsonl"), budget)
+	if err != nil {
+		return Presence{}, false
+	}
+	defer f.Close()
 
-		var events []struct {
+	var events []struct {
+		event openEvent
+		at    time.Time
+	}
+	forEachCompleteLine(f, func(line []byte) {
+		var ev openEvent
+		if err := json.Unmarshal(line, &ev); err != nil {
+			return
+		}
+		at, err := time.Parse(time.RFC3339Nano, ev.At)
+		if err != nil || !validPhase(ev.Phase) || at.After(now.Add(futureLeeway)) {
+			return
+		}
+		events = append(events, struct {
 			event openEvent
 			at    time.Time
-		}
-		forEachCompleteLine(f, func(line []byte) {
-			var ev openEvent
-			if err := json.Unmarshal(line, &ev); err != nil {
-				return
-			}
-			at, err := time.Parse(time.RFC3339Nano, ev.At)
-			if err != nil || !validPhase(ev.Phase) || at.After(now.Add(futureLeeway)) {
-				return
-			}
-			events = append(events, struct {
-				event openEvent
-				at    time.Time
-			}{event: ev, at: at})
-		})
-		sort.SliceStable(events, func(i, j int) bool {
-			return events[i].at.Before(events[j].at)
-		})
-
-		var p Presence
-		for _, item := range events {
-			ev, at := item.event, item.at
-			p.Phase = ev.Phase
-			p.UpdatedAt = at
-			if v := cleanText(ev.Objective); v != "" {
-				p.Objective = v
-			}
-			if v := cleanText(ev.Summary); v != "" {
-				appendStep(&p, Step{At: at, Phase: ev.Phase, Summary: v})
-			}
-			for _, path := range ev.Paths {
-				if v, ok := cleanRelativePath(path); ok {
-					appendUnique(&p.Paths, v)
-				}
-			}
-			switch ev.Verification {
-			case "passed", "failed":
-				p.Verification = ev.Verification
-			}
-			if v := cleanText(ev.Failure); v != "" {
-				appendUnique(&p.Failures, v)
-			}
-			for _, item := range ev.Unresolved {
-				if v := cleanText(item); v != "" {
-					appendUnique(&p.Unresolved, v)
-				}
-			}
-		}
-		if !p.Available() {
-			return Presence{}, false
-		}
-		p.Active = now.Sub(p.UpdatedAt) <= freshFor && now.Sub(p.UpdatedAt) >= -futureLeeway
-		return p, true
+		}{event: ev, at: at})
 	})
+	sort.SliceStable(events, func(i, j int) bool {
+		return events[i].at.Before(events[j].at)
+	})
+
+	var p Presence
+	for _, item := range events {
+		ev, at := item.event, item.at
+		p.Phase = ev.Phase
+		p.UpdatedAt = at
+		if v := cleanText(ev.Objective); v != "" {
+			p.Objective = v
+		}
+		if v := cleanText(ev.Summary); v != "" {
+			appendStep(&p, Step{At: at, Phase: ev.Phase, Summary: v})
+		}
+		for _, path := range ev.Paths {
+			if v, ok := cleanRelativePath(path); ok {
+				appendUnique(&p.Paths, v)
+			}
+		}
+		switch ev.Verification {
+		case "passed", "failed":
+			p.Verification = ev.Verification
+		}
+		if v := cleanText(ev.Failure); v != "" {
+			appendUnique(&p.Failures, v)
+		}
+		for _, item := range ev.Unresolved {
+			if v := cleanText(item); v != "" {
+				appendUnique(&p.Unresolved, v)
+			}
+		}
+	}
+	if !p.Available() {
+		return Presence{}, false
+	}
+	p.Active = now.Sub(p.UpdatedAt) <= freshFor && now.Sub(p.UpdatedAt) >= -futureLeeway
+	return p, true
 }
 
 type gnhfEvent struct {
@@ -259,75 +311,51 @@ type gnhfEvent struct {
 	} `json:"item"`
 }
 
-func readGNHFRuns(root string, now time.Time, budget *readBudget) []Presence {
-	return readRunDirs(root, func(dir string) (Presence, bool) {
-		entries, err := safeReadDir(dir, maxRunEntries)
-		if err != nil {
-			return Presence{}, false
-		}
-		var logs []string
-		for _, entry := range entries {
-			name := entry.Name()
-			if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 ||
-				!strings.HasPrefix(name, "iteration-") || !strings.HasSuffix(name, ".jsonl") {
-				continue
-			}
-			logs = append(logs, filepath.Join(dir, name))
-		}
-		if len(logs) == 0 {
-			return Presence{}, false
-		}
-		sort.Slice(logs, func(i, j int) bool {
-			return iterationNumber(logs[i]) < iterationNumber(logs[j])
-		})
-		if len(logs) > maxSteps {
-			logs = logs[len(logs)-maxSteps:]
-		}
-
-		// prompt.md and event item payloads are intentionally not read into
-		// the plaque. Only the writer's curated iteration summaries cross the
-		// compatibility boundary.
-		p := Presence{}
-		summaries := noteSummaries(filepath.Join(dir, "notes.md"), budget)
-		for _, path := range logs {
-			phase, at, ok := readGNHFLog(path, now, budget)
-			if !ok {
-				continue
-			}
-			p.Phase, p.UpdatedAt = phase, at
-			n := iterationNumber(path)
-			if summary := summaries[n]; summary != "" {
-				appendStep(&p, Step{At: at, Phase: phase, Summary: summary})
-			}
-		}
-		if !p.Available() {
-			return Presence{}, false
-		}
-		p.Active = now.Sub(p.UpdatedAt) <= freshFor && now.Sub(p.UpdatedAt) >= -futureLeeway
-		return p, true
-	})
-}
-
-func readRunDirs(root string, read func(string) (Presence, bool)) []Presence {
-	entries, err := recentRunDirs(root)
+func readGNHFRun(dir string, now time.Time, budget *readBudget) (Presence, bool) {
+	entries, err := safeReadDir(dir, maxRunEntries)
 	if err != nil {
-		return nil
+		return Presence{}, false
 	}
-	var out []Presence
+	var logs []string
 	for _, entry := range entries {
-		if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+		name := entry.Name()
+		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 ||
+			!strings.HasPrefix(name, "iteration-") || !strings.HasSuffix(name, ".jsonl") {
 			continue
 		}
-		dir := filepath.Join(root, entry.Name())
-		info, err := os.Lstat(dir)
-		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		logs = append(logs, filepath.Join(dir, name))
+	}
+	if len(logs) == 0 {
+		return Presence{}, false
+	}
+	sort.Slice(logs, func(i, j int) bool {
+		return iterationNumber(logs[i]) < iterationNumber(logs[j])
+	})
+	if len(logs) > maxSteps {
+		logs = logs[len(logs)-maxSteps:]
+	}
+
+	// prompt.md and event item payloads are intentionally not read into
+	// the plaque. Only the writer's curated iteration summaries cross the
+	// compatibility boundary.
+	p := Presence{}
+	summaries := noteSummaries(filepath.Join(dir, "notes.md"), budget)
+	for _, path := range logs {
+		phase, at, ok := readGNHFLog(path, now, budget)
+		if !ok {
 			continue
 		}
-		if p, ok := read(dir); ok {
-			out = append(out, p)
+		p.Phase, p.UpdatedAt = phase, at
+		n := iterationNumber(path)
+		if summary := summaries[n]; summary != "" {
+			appendStep(&p, Step{At: at, Phase: phase, Summary: summary})
 		}
 	}
-	return out
+	if !p.Available() {
+		return Presence{}, false
+	}
+	p.Active = now.Sub(p.UpdatedAt) <= freshFor && now.Sub(p.UpdatedAt) >= -futureLeeway
+	return p, true
 }
 
 func recentRunDirs(root string) ([]os.DirEntry, error) {
