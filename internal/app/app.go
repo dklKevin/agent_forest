@@ -14,6 +14,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/dklKevin/agentforest/internal/agentrun"
 	"github.com/dklKevin/agentforest/internal/events"
 	"github.com/dklKevin/agentforest/internal/gitscan"
 	"github.com/dklKevin/agentforest/internal/model"
@@ -27,13 +28,15 @@ type App struct {
 	HasSettings bool // settings.json existed; false means first run
 	Skipped     int  // unreadable event-log lines skipped while loading
 
-	// events and occupancy cross together from the scan goroutine to the UI.
+	// Events, occupancy, and local run evidence cross together from the scan
+	// goroutine to the UI.
 	// stateMu guards every access and lets Towns copy one consistent view.
 	// Event entries are immutable after publication, so copying the slice is
 	// sufficient; occupancy is copied because its map is updated in place.
 	stateMu   sync.RWMutex
 	events    []events.Event
 	occupancy map[string]gitscan.Occupancy
+	runs      map[string]agentrun.Presence
 }
 
 // Load reads settings and the event log from the storage directory.
@@ -99,7 +102,7 @@ func (a *App) Connected() bool {
 // them later costs nothing. Finish state and epitaphs are derived state,
 // folded from the log's finish/unfinish events.
 func (a *App) Towns() []*model.Town {
-	evs, occ := a.townSnapshot()
+	evs, occ, runs := a.townSnapshot()
 	repos := events.Reduce(evs)
 	towns := make([]*model.Town, 0, len(repos))
 	for _, r := range repos {
@@ -110,6 +113,7 @@ func (a *App) Towns() []*model.Town {
 		if o, ok := occ[r.Path]; ok {
 			t.Occupancy = model.Occupancy{Dirty: o.Dirty, Branch: o.Branch, Worktrees: o.Worktrees}
 		}
+		t.Run = runs[r.Path]
 		towns = append(towns, t)
 	}
 	return towns
@@ -124,21 +128,22 @@ func (a *App) EventsSnapshot() []events.Event {
 	return append([]events.Event(nil), a.events...)
 }
 
-// townSnapshot copies the event slice and occupancy map under one read lock.
-// The lock is held only for the copies, never across reducing, rendering, git,
-// or store I/O.
-func (a *App) townSnapshot() ([]events.Event, map[string]gitscan.Occupancy) {
+// townSnapshot copies the event slice, occupancy map, and run evidence under
+// one read lock. The lock is held only for the copies, never across reducing,
+// rendering, git, filesystem-adapter, or store I/O.
+func (a *App) townSnapshot() ([]events.Event, map[string]gitscan.Occupancy, map[string]agentrun.Presence) {
 	a.stateMu.RLock()
 	defer a.stateMu.RUnlock()
 	evs := append([]events.Event(nil), a.events...)
-	if len(a.occupancy) == 0 {
-		return evs, nil
-	}
-	snap := make(map[string]gitscan.Occupancy, len(a.occupancy))
+	occ := make(map[string]gitscan.Occupancy, len(a.occupancy))
 	for k, v := range a.occupancy {
-		snap[k] = v
+		occ[k] = v
 	}
-	return evs, snap
+	runs := make(map[string]agentrun.Presence, len(a.runs))
+	for k, v := range a.runs {
+		runs[k] = v
+	}
+	return evs, occ, runs
 }
 
 // EpitaphMaxRunes is the carving limit. An epitaph is carved, not written:
@@ -251,6 +256,9 @@ type ScanReport struct {
 	// OccupancyShift reports that some repo's working-state read changed in
 	// this pass, so camps need a world rebuild even when no events landed.
 	OccupancyShift bool
+	// PresenceShift reports that local run evidence changed in this pass.
+	// Like occupancy, it is volatile display state and never persisted.
+	PresenceShift bool
 }
 
 // ConnectRoot records a new root directory and scans it. The root must
@@ -306,6 +314,7 @@ func (a *App) scan(repos []string, now time.Time, pruneMissing bool) (ScanReport
 		evs  []events.Event
 		err  error
 		occ  gitscan.Occupancy
+		run  agentrun.Presence
 	}
 	results := make([]result, len(repos))
 	var wg sync.WaitGroup
@@ -317,7 +326,10 @@ func (a *App) scan(repos []string, now time.Time, pruneMissing bool) (ScanReport
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			evs, err := gitscan.Scan(repo, known[repo], now)
-			results[i] = result{repo, evs, err, gitscan.ReadOccupancy(repo)}
+			results[i] = result{
+				repo: repo, evs: evs, err: err,
+				occ: gitscan.ReadOccupancy(repo), run: agentrun.Read(repo, now),
+			}
 		}(i, repo)
 	}
 	wg.Wait()
@@ -344,11 +356,22 @@ func (a *App) scan(repos []string, now time.Time, pruneMissing bool) (ScanReport
 	if a.occupancy == nil {
 		a.occupancy = map[string]gitscan.Occupancy{}
 	}
+	if a.runs == nil {
+		a.runs = map[string]agentrun.Presence{}
+	}
 	for _, r := range results {
 		if a.occupancy[r.repo] != r.occ {
 			rep.OccupancyShift = true
 		}
 		a.occupancy[r.repo] = r.occ
+		if !agentrun.Equal(a.runs[r.repo], r.run) {
+			rep.PresenceShift = true
+		}
+		if r.run.Available() {
+			a.runs[r.repo] = r.run
+		} else {
+			delete(a.runs, r.repo)
+		}
 	}
 	if pruneMissing {
 		kept := make(map[string]bool, len(repos))
@@ -359,6 +382,12 @@ func (a *App) scan(repos []string, now time.Time, pruneMissing bool) (ScanReport
 			if !kept[path] {
 				delete(a.occupancy, path)
 				rep.OccupancyShift = true
+			}
+		}
+		for path := range a.runs {
+			if !kept[path] {
+				delete(a.runs, path)
+				rep.PresenceShift = true
 			}
 		}
 	}

@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"private-provider-id"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"type":"command_execution","command":"must never appear"}}
+{"type":"turn.completed","usage":{"input_tokens":99999}}

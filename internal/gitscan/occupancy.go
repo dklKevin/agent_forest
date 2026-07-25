@@ -41,7 +41,8 @@ func ReadOccupancy(path string) Occupancy {
 // check stays cheap even on huge repos; an unborn HEAD or any other error
 // reads as clean.
 func dirtyTree(path string) bool {
-	return gitExitCode(path, "diff", "--quiet", "HEAD", "--") == 1
+	return gitExitCode(path, "diff", "--quiet", "HEAD", "--", ".",
+		":(exclude).agentforest/**", ":(exclude).gnhf/**") == 1
 }
 
 // hasUntracked reports whether any untracked file exists. ls-files streams
@@ -50,7 +51,9 @@ func dirtyTree(path string) bool {
 // directories are folded to one entry so git's own walk stays short too.
 func hasUntracked(path string) bool {
 	cmd := exec.Command("git", "-C", path, "--no-optional-locks",
-		"ls-files", "--others", "--exclude-standard", "--directory", "--no-empty-directory", "-z")
+		"ls-files", "--others", "--exclude-standard",
+		"--exclude=.agentforest/", "--exclude=.gnhf/",
+		"--directory", "--no-empty-directory", "-z")
 	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0")
 	out, err := cmd.StdoutPipe()
 	if err != nil {

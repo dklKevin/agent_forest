@@ -15,6 +15,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/harmonica"
 
+	"github.com/dklKevin/agentforest/internal/agentrun"
 	"github.com/dklKevin/agentforest/internal/almanac"
 	"github.com/dklKevin/agentforest/internal/app"
 	"github.com/dklKevin/agentforest/internal/canvas"
@@ -66,6 +67,7 @@ const (
 	inspect
 	almanacView   // the town's memoir, one deliberate keypress past inspect
 	guidebookView // the town's own pages, read from its files alone
+	replayView    // a curated local work plaque, one keypress past inspect
 	preview       // the neglect preview: scrub years of decay ahead
 	helpView
 	connectInput
@@ -237,6 +239,7 @@ func scanCmd(a *app.App, kind scanKind, root string, paths []string) tea.Cmd {
 				rep.Changed += r.Changed
 				rep.NewEvents += r.NewEvents
 				rep.OccupancyShift = rep.OccupancyShift || r.OccupancyShift
+				rep.PresenceShift = rep.PresenceShift || r.PresenceShift
 				rep.Errors = append(rep.Errors, r.Errors...)
 				if e != nil && err == nil {
 					err = e
@@ -434,10 +437,11 @@ func (m *Model) maybePoll() tea.Cmd {
 		if path == "" {
 			continue
 		}
-		fp := gitscan.Fingerprint(path)
-		if fp == "" {
+		gitFP := gitscan.Fingerprint(path)
+		if gitFP == "" {
 			continue // repo gone: it stands, and decays, on its history
 		}
+		fp := gitFP + ":" + agentrun.Fingerprint(path)
 		if old, ok := m.fps[path]; ok && old != fp {
 			changed = append(changed, path)
 		}
@@ -509,7 +513,7 @@ func (m Model) scanDone(msg scanDoneMsg) (tea.Model, tea.Cmd) {
 		// closed, so the pulse runs even when this scan found nothing new
 		// itself - and even when the scan failed, the log on disk still
 		// tells the story.
-		if msg.err == nil && (msg.rep.NewEvents > 0 || msg.rep.OccupancyShift) {
+		if msg.err == nil && (msg.rep.NewEvents > 0 || msg.rep.OccupancyShift || msg.rep.PresenceShift) {
 			m.rebuildWorld()
 		}
 		m.beginPulse()
@@ -570,9 +574,9 @@ func (m Model) scanDone(msg scanDoneMsg) (tea.Model, tea.Cmd) {
 		case msg.kind == scanRefresh:
 			m.toast(fmt.Sprintf("refreshed · %d towns grew", msg.rep.Changed))
 		}
-	} else if msg.rep.OccupancyShift {
-		// No history landed, but a camp pitched or broke: rebuild so the
-		// mark tracks the working tree. Camps are quiet; no toast.
+	} else if msg.rep.OccupancyShift || msg.rep.PresenceShift {
+		// No history landed, but a camp, phase mark, or plaque changed:
+		// rebuild from the one atomically published scan view. Quietly.
 		m.rebuildWorld()
 		if msg.kind == scanRefresh {
 			m.toast("refreshed · nothing new")
@@ -779,6 +783,14 @@ func (m Model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.bookFrom = m.mode
 			m.book, m.bookFor = guidebook.Read(m.focus.Town.Path), bookKey(m.focus.Town)
 			m.mode = guidebookView
+		}
+	case "w":
+		// A work plaque is one deliberate step beyond inspect. It exposes
+		// only the curated local evidence already represented by the mark.
+		if m.mode == replayView {
+			m.mode = inspect
+		} else if m.mode == inspect && m.focus != nil && m.focus.Town.Run.Available() {
+			m.mode = replayView
 		}
 	case "d":
 		if m.mode == preview {
@@ -1117,6 +1129,8 @@ func (m Model) View() string {
 		m.drawAlmanac()
 	case guidebookView:
 		m.drawGuidebook()
+	case replayView:
+		m.drawReplay()
 	case preview:
 		m.drawPreview()
 	case helpView:
@@ -1232,6 +1246,16 @@ func (m Model) drawInspect() {
 	// The camp: one quiet line while the working tree holds unfinished work.
 	if !t.Finished && t.Occupancy.Occupied() {
 		lines = append(lines, line{t.Occupancy.Line(), 150, 0})
+	}
+	if t.Run.Available() {
+		if t.Run.ActiveAt(m.now) && !t.Finished {
+			prefix := "recent work mark · "
+			if t.Run.Phase.InProgress() {
+				prefix = "work at the clearing · "
+			}
+			lines = append(lines, line{prefix + t.Run.Phase.String(), 165, 60})
+		}
+		lines = append(lines, line{"w · read the work plaque", 135, 0})
 	}
 	// The carved epitaph: the user's own words, read only here. The map
 	// stays silent; the monument just stands.
@@ -1566,6 +1590,69 @@ func (m Model) drawFinishConfirm() {
 	m.panel(lines)
 }
 
+// drawReplay opens the work plaque. The map carries only silhouettes; this
+// deliberate view is the accessible text alternative and the bounded causal
+// replay: intent, curated turns, touched paths, verification, failures, and
+// unresolved questions. It never shows prompts, commands, output, or provider
+// identity.
+func (m Model) drawReplay() {
+	if m.focus == nil {
+		return
+	}
+	t := m.focus.Town
+	p := t.Run
+	lines := []line{{"work plaque · " + t.Name, 230, 235}, {"", 0, 0}}
+	if !p.Available() {
+		lines = append(lines,
+			line{"no local work evidence remains", 150, 0},
+			line{"", 0, 0},
+			line{"w back to inspect", 115, 0},
+		)
+		m.panel(lines)
+		return
+	}
+	phase := "phase · " + p.Phase.String()
+	if !p.ActiveAt(m.now) {
+		phase += " · the clearing is quiet now"
+	}
+	lines = append(lines, line{phase, 175, 60})
+	if p.Objective != "" {
+		lines = append(lines, line{"aim · " + p.Objective, 165, 0})
+	}
+	steps := p.Steps
+	if len(steps) > 4 {
+		steps = steps[len(steps)-4:]
+	}
+	for _, step := range steps {
+		lines = append(lines, line{step.Phase.String() + " · " + step.Summary, 150, 0})
+	}
+	if len(p.Paths) > 0 {
+		paths := p.Paths
+		if len(paths) > 3 {
+			paths = paths[:3]
+		}
+		lines = append(lines, line{"touched · " + strings.Join(paths, " · "), 140, 0})
+	}
+	if p.Verification != "" {
+		lines = append(lines, line{"verification · " + p.Verification, 160, 0})
+	}
+	for _, failure := range firstStrings(p.Failures, 2) {
+		lines = append(lines, line{"setback · " + failure, 150, 0})
+	}
+	for _, question := range firstStrings(p.Unresolved, 2) {
+		lines = append(lines, line{"unresolved · " + question, 150, 0})
+	}
+	lines = append(lines, line{"", 0, 0}, line{"w back to inspect", 115, 0})
+	m.panel(lines)
+}
+
+func firstStrings(items []string, n int) []string {
+	if len(items) <= n {
+		return items
+	}
+	return items[:n]
+}
+
 func (m Model) drawHelp() {
 	lines := []line{
 		{"agentforest", 230, 235},
@@ -1575,6 +1662,7 @@ func (m Model) drawHelp() {
 		{"inspect    enter or i · numbers live here only", 150, 0},
 		{"almanac    a while inspecting · the town's memoir", 150, 0},
 		{"guidebook  b · the town's own pages, read from its files", 150, 0},
+		{"work plaque w while inspecting · local evidence only", 150, 0},
 		{"finished   f · lay a town to rest as a monument", 150, 0},
 		{"foresee    d · preview the years of neglect", 150, 0},
 		{"connect    c · add a root full of repositories", 150, 0},

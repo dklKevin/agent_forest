@@ -359,11 +359,12 @@ func (w *World) signPass(p *sprite.P, f Frame, s *Site, dw int, vs float64, grou
 	gy := ground(float64(s.SignX))
 	stakes := s.StakesX - int(f.Cam)
 	p.DrawTags(xnoise.Hash(w.Seed, 0x7A6, uint64(s.SignX)), stakes, ground(float64(s.StakesX)), len(s.Town.Tags), 100, d)
-	// The occupancy camp: someone is at the town while the working tree
-	// holds unfinished work. Presence only - drawn fresh from the latest
-	// scan's read, never from anything stored - and a monument stays still,
-	// so a finished town never shows one.
-	if s.Town.Occupancy.Occupied() && !s.Town.Finished {
+	// The campsite is current local presence: unfinished git work or a fresh,
+	// explicitly evidenced run. Both are read at scan time and never stored.
+	// A monument stays still, so a finished town never shows one.
+	run := s.Town.Run
+	runActive := run.ActiveAt(f.Now)
+	if (s.Town.Occupancy.Occupied() || (runActive && run.Phase.InProgress())) && !s.Town.Finished {
 		away := 1
 		if s.CampX < s.Hearth.X {
 			away = -1
@@ -373,6 +374,12 @@ func (w *World) signPass(p *sprite.P, f Frame, s *Site, dw int, vs float64, grou
 			X:    s.CampX - int(f.Cam), GroundY: ground(float64(s.CampX)),
 			Away: away, Lvl: 118,
 			Second: s.Town.Occupancy.Worktrees > 0,
+		})
+	}
+	if run.Available() && !s.Town.Finished {
+		p.DrawWorkMark(sprite.WorkMark{
+			X: s.CampX - int(f.Cam), GroundY: ground(float64(s.CampX)),
+			Phase: run.Phase, Active: runActive, Plaque: true, Lvl: 136,
 		})
 	}
 	signX, signGY, hang, armC := sprite.CabinSignMount(

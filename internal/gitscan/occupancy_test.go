@@ -66,6 +66,39 @@ func TestReadOccupancyUntrackedFile(t *testing.T) {
 	}
 }
 
+func TestRunEvidenceDoesNotFabricateGitOccupancy(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "evidence")
+	initRepo(t, repo)
+	commitAt(t, repo, time.Now().Add(-time.Hour), "a.go", "package a")
+
+	open := filepath.Join(repo, ".agentforest", "runs", "one", "events.jsonl")
+	if err := os.MkdirAll(filepath.Dir(open), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(open, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gnhf := filepath.Join(repo, ".gnhf", "runs", "one", "notes.md")
+	if err := os.MkdirAll(filepath.Dir(gnhf), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(gnhf, []byte("local"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if o := ReadOccupancy(repo); o.Dirty {
+		t.Fatalf("untracked evidence fabricated a dirty camp: %+v", o)
+	}
+
+	gitIn(t, repo, nil, "add", "-f", ".agentforest")
+	gitIn(t, repo, nil, "commit", "-q", "-m", "track fixture")
+	if err := os.WriteFile(open, []byte("{\"partial\":"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if o := ReadOccupancy(repo); o.Dirty {
+		t.Fatalf("tracked evidence update fabricated a dirty camp: %+v", o)
+	}
+}
+
 func TestReadOccupancyNonDefaultBranch(t *testing.T) {
 	repo := filepath.Join(t.TempDir(), "branchy")
 	initRepo(t, repo)

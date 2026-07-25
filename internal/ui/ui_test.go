@@ -10,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/dklKevin/agentforest/internal/agentrun"
 	"github.com/dklKevin/agentforest/internal/almanac"
 	"github.com/dklKevin/agentforest/internal/app"
 	"github.com/dklKevin/agentforest/internal/canvas"
@@ -105,6 +106,14 @@ func mkUIRepo(t *testing.T, dir string) {
 func TestScanAndUIReadEventsConcurrently(t *testing.T) {
 	repo := filepath.Join(t.TempDir(), "live")
 	mkUIRepo(t, repo)
+	evidence := filepath.Join(repo, ".agentforest", "runs", "one", "events.jsonl")
+	if err := os.MkdirAll(filepath.Dir(evidence), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line := `{"at":"` + time.Now().UTC().Format(time.RFC3339Nano) + `","phase":"building"}` + "\n"
+	if err := os.WriteFile(evidence, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	a := &app.App{Dir: t.TempDir(), Settings: &store.Settings{}}
 	m := Model{app: a}
 
@@ -165,6 +174,9 @@ func TestScanAndUIReadEventsConcurrently(t *testing.T) {
 			if almanac.Fold(m.almanacEvents(), repo, time.Now()) == nil {
 				t.Fatal("scan history did not build an almanac")
 			}
+			if !a.Towns()[0].Run.Available() {
+				t.Fatal("atomic scan publication lost local run evidence")
+			}
 			return
 		default:
 			_ = a.Towns()
@@ -216,6 +228,11 @@ func TestScanDoneRebuildsOnOccupancyShift(t *testing.T) {
 	if m = mm.(Model); len(m.world.Sites) != 0 {
 		t.Fatal("an occupancy shift did not rebuild the world from app state")
 	}
+	m = persistedUIModel(t, uiRepoTown("keepsake", "/repos/keepsake", false, "", time.Now()), a)
+	mm, _ = m.Update(scanDoneMsg{kind: scanLive, rep: app.ScanReport{PresenceShift: true}})
+	if m = mm.(Model); len(m.world.Sites) != 0 {
+		t.Fatal("a presence shift did not rebuild the world from app state")
+	}
 }
 
 func TestScanLiveAggregatesOccupancyShift(t *testing.T) {
@@ -243,6 +260,92 @@ func TestScanLiveAggregatesOccupancyShift(t *testing.T) {
 	}
 	if !msg.rep.OccupancyShift {
 		t.Fatalf("live scan dropped occupancy shift: %+v", msg.rep)
+	}
+}
+
+func TestScanLiveAggregatesPresenceShift(t *testing.T) {
+	t.Setenv("AGENTFOREST_HOME", t.TempDir())
+	root := t.TempDir()
+	repo := filepath.Join(root, "busy")
+	mkUIRepo(t, repo)
+
+	a, err := app.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.ConnectRoot(root, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	key, _ := a.FindTown("busy")
+	path := filepath.Join(repo, ".agentforest", "runs", "one", "events.jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line := `{"at":"` + time.Now().UTC().Format(time.RFC3339Nano) + `","phase":"planning"}` + "\n"
+	if err := os.WriteFile(path, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	msg := scanCmd(a, scanLive, "", []string{key})().(scanDoneMsg)
+	if msg.err != nil || !msg.rep.PresenceShift {
+		t.Fatalf("live scan dropped presence shift: %+v", msg)
+	}
+}
+
+func TestWorkPlaqueOpensOnlyFromInspectAndNamesPhase(t *testing.T) {
+	now := time.Now()
+	town := uiTown("keepsake", false, "", now)
+	town.Run = agentrun.Presence{
+		Phase: agentrun.Testing, Active: true, UpdatedAt: now,
+		Objective: "keep local evidence honest",
+		Steps: []agentrun.Step{
+			{At: now, Phase: agentrun.Building, Summary: "joined the guarded scan"},
+			{At: now, Phase: agentrun.Testing, Summary: "ran the race check"},
+		},
+		Paths: []string{"internal/app/app.go"}, Verification: "passed",
+		Failures: []string{"one malformed record"}, Unresolved: []string{"review the silhouette"},
+	}
+	m := uiModel(t, town)
+	m = press(t, m, runes("w"))
+	if m.mode != roam {
+		t.Fatal("work plaque opened straight from the map")
+	}
+	m.mode = inspect
+	if out := m.View(); !strings.Contains(out, "work at the clearing · testing") ||
+		!strings.Contains(out, "w · read the work plaque") {
+		t.Fatalf("inspect lacks the accessible mark and plaque action:\n%s", out)
+	}
+	m = press(t, m, runes("w"))
+	if m.mode != replayView {
+		t.Fatalf("w from inspect did not open plaque: mode=%v", m.mode)
+	}
+	out := m.View()
+	for _, want := range []string{
+		"work plaque · keepsake", "phase · testing", "aim · keep local evidence honest",
+		"building · joined the guarded scan", "verification · passed",
+		"setback · one malformed record", "unresolved · review the silhouette",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("work plaque missing %q:\n%s", want, out)
+		}
+	}
+	m = press(t, m, runes("w"))
+	if m.mode != inspect {
+		t.Fatal("w did not return to inspect")
+	}
+}
+
+func TestStaleWorkPlaqueNeverClaimsActiveWork(t *testing.T) {
+	town := uiTown("keepsake", false, "", time.Now())
+	town.Run = agentrun.Presence{Phase: agentrun.HandedOff, Objective: "leave a trace"}
+	m := uiModel(t, town)
+	m.mode = inspect
+	out := m.View()
+	if strings.Contains(out, "work at the clearing") || !strings.Contains(out, "w · read the work plaque") {
+		t.Fatalf("stale evidence claimed activity or lost its plaque:\n%s", out)
+	}
+	m = press(t, m, runes("w"))
+	if out = m.View(); !strings.Contains(out, "the clearing is quiet now") {
+		t.Fatalf("stale plaque lacks quiet state:\n%s", out)
 	}
 }
 

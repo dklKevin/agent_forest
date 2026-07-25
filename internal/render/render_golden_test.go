@@ -1,9 +1,11 @@
 package render_test
 
 import (
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/dklKevin/agentforest/internal/agentrun"
 	"github.com/dklKevin/agentforest/internal/canvas"
 	"github.com/dklKevin/agentforest/internal/events"
 	"github.com/dklKevin/agentforest/internal/forest"
@@ -212,6 +214,45 @@ func TestOccupancyCampGolden(t *testing.T) {
 	renderFixture(t, "occupancy_camp_parallel", w, "cedarhold")
 }
 
+func TestAgentRunPhaseMarkGolden(t *testing.T) {
+	town := plainTown("cedarhold", 120, 4, 0, fixedNow)
+	town.Run = agentrun.Presence{
+		Phase: agentrun.Building, Active: true, UpdatedAt: fixedNow,
+		Objective: "shape-only local presence",
+	}
+	w := forest.Build(lcSeed, []*model.Town{town})
+	renderFixture(t, "agent_run_building", w, "cedarhold")
+}
+
+func TestEveryAgentRunPhaseHasADistinctShape(t *testing.T) {
+	phases := []agentrun.Phase{
+		agentrun.Planning, agentrun.Building, agentrun.Testing, agentrun.Reviewing,
+		agentrun.Blocked, agentrun.HandedOff, agentrun.Completed,
+	}
+	seen := map[string]agentrun.Phase{}
+	for _, phase := range phases {
+		town := plainTown("cedarhold", 120, 4, 0, fixedNow)
+		town.Run = agentrun.Presence{
+			Phase: phase, Active: true, UpdatedAt: fixedNow,
+			Objective: "shape-only local presence",
+		}
+		out, err := render.RenderSnapshot(forest.Build(lcSeed, []*model.Town{town}), render.SnapshotOpts{
+			Width: lcW, Height: lcH, At: "cedarhold", T: snapT,
+			Now: fixedNow, Profile: canvas.NoColor,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if previous, ok := seen[out]; ok {
+			t.Fatalf("%s and %s rendered the same phase silhouette", previous, phase)
+		}
+		if strings.Contains(out, phase.String()) || strings.Contains(out, "shape-only local presence") {
+			t.Fatalf("%s leaked a label onto the numberless map", phase)
+		}
+		seen[out] = phase
+	}
+}
+
 // The camp is presence, not layout: whether a town is occupied must not move
 // a single tree, building, or fence - the mark alone appears and breaks.
 func TestOccupancyNeverMovesTheTown(t *testing.T) {
@@ -244,6 +285,7 @@ func TestOccupancyCampStaysOffMonuments(t *testing.T) {
 	kept := settlementTown("harborfold", true, fixedNow)
 	occupied := settlementTown("harborfold", true, fixedNow)
 	occupied.Occupancy = model.Occupancy{Dirty: true, Branch: "wip", Worktrees: 2}
+	occupied.Run = agentrun.Presence{Phase: agentrun.Building, Active: true}
 	snap := func(town *model.Town) string {
 		out, err := render.RenderSnapshot(forest.Build(lcSeed, []*model.Town{town}), render.SnapshotOpts{
 			Width: lcW, Height: lcH, At: "harborfold", T: snapT,

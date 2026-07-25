@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dklKevin/agentforest/internal/agentrun"
 	"github.com/dklKevin/agentforest/internal/events"
 	"github.com/dklKevin/agentforest/internal/xnoise"
 )
@@ -227,6 +228,9 @@ type Town struct {
 	// Occupancy is the working state read at the latest scan: display state
 	// only, rebuilt with the world, never persisted.
 	Occupancy Occupancy
+	// Run is curated local filesystem evidence read at the latest scan. Like
+	// occupancy it is display-only and is never persisted by AgentForest.
+	Run agentrun.Presence
 	// IdleOverride, when set, replaces the real idle time. It exists for the
 	// neglect preview so stages can be seen without waiting real days.
 	IdleOverride *time.Duration

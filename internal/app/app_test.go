@@ -43,6 +43,20 @@ func mkRepo(t *testing.T, dir string, ts time.Time, file, content string) {
 	commitAt(t, dir, ts, file, content)
 }
 
+func writeRunEvidence(t *testing.T, repo string, at time.Time, phase, summary string) string {
+	t.Helper()
+	path := filepath.Join(repo, ".agentforest", "runs", "local", "events.jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line := fmt.Sprintf("{\"at\":%q,\"phase\":%q,\"summary\":%q}\n",
+		at.Format(time.RFC3339Nano), phase, summary)
+	if err := os.WriteFile(path, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestConnectPersistExcludeRelaunch(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("AGENTFOREST_HOME", home)
@@ -390,6 +404,59 @@ func TestScanReadsAndClearsOccupancy(t *testing.T) {
 	}
 }
 
+func TestScanReadsClearsAndForgetsRunPresence(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENTFOREST_HOME", home)
+	root := t.TempDir()
+	repo := filepath.Join(root, "busy")
+	mkRepo(t, repo, time.Now().Add(-48*time.Hour), "main.go", "package main")
+
+	a, _ := Load()
+	if _, err := a.ConnectRoot(root, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	before := len(a.EventsSnapshot())
+	path := writeRunEvidence(t, repo, time.Now().Add(-time.Minute), "testing", "checked the boundary")
+	key, _ := a.FindTown("busy")
+	rep, err := a.RescanRepo(key, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.PresenceShift || rep.NewEvents != 0 {
+		t.Fatalf("run-only scan report = %+v", rep)
+	}
+	run := a.Towns()[0].Run
+	if !run.Active || run.Phase.String() != "testing" || len(run.Steps) != 1 {
+		t.Fatalf("run not attached: %+v", run)
+	}
+	if len(a.EventsSnapshot()) != before {
+		t.Fatal("run evidence leaked into the forest event log")
+	}
+
+	// Relaunching from AgentForest storage alone cannot resurrect presence.
+	b, _ := Load()
+	if b.Towns()[0].Run.Available() {
+		t.Fatalf("run persisted across relaunch: %+v", b.Towns()[0].Run)
+	}
+	if _, err := b.Reconcile(time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if !b.Towns()[0].Run.Available() {
+		t.Fatal("foreground reconcile did not re-read local evidence")
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	rep, err = b.RescanRepo(key, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.PresenceShift || b.Towns()[0].Run.Available() {
+		t.Fatalf("removed evidence left a plaque: report=%+v run=%+v", rep, b.Towns()[0].Run)
+	}
+}
+
 func TestReconcilePersistenceFailurePublishesNoState(t *testing.T) {
 	t.Setenv("AGENTFOREST_HOME", t.TempDir())
 	root := t.TempDir()
@@ -411,6 +478,7 @@ func TestReconcilePersistenceFailurePublishesNoState(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(keep, "main.go"), []byte("package main // working"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	writeRunEvidence(t, keep, time.Now(), "building", "must not publish")
 	blocked := filepath.Join(t.TempDir(), "not-a-directory")
 	if err := os.WriteFile(blocked, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
@@ -432,6 +500,9 @@ func TestReconcilePersistenceFailurePublishesNoState(t *testing.T) {
 		case "keep":
 			if town.Occupancy.Occupied() {
 				t.Fatalf("published new occupancy after persistence failure: %+v", town.Occupancy)
+			}
+			if town.Run.Available() {
+				t.Fatalf("published run evidence after persistence failure: %+v", town.Run)
 			}
 		case "gone":
 			if town.Occupancy.Branch != "wip" {
@@ -479,6 +550,7 @@ func TestReconcilePrunesVanishedOccupancy(t *testing.T) {
 	repo := filepath.Join(root, "gone")
 	mkRepo(t, repo, time.Now().Add(-48*time.Hour), "main.go", "package main")
 	gitIn(t, repo, nil, "checkout", "-q", "-b", "wip")
+	writeRunEvidence(t, repo, time.Now(), "planning", "one local turn")
 
 	a, _ := Load()
 	if _, err := a.ConnectRoot(root, time.Now()); err != nil {
@@ -486,6 +558,9 @@ func TestReconcilePrunesVanishedOccupancy(t *testing.T) {
 	}
 	if a.Towns()[0].Occupancy.Branch != "wip" {
 		t.Fatalf("occupancy not read: %+v", a.Towns()[0].Occupancy)
+	}
+	if !a.Towns()[0].Run.Available() {
+		t.Fatal("run evidence not read before prune")
 	}
 	if err := os.RemoveAll(repo); err != nil {
 		t.Fatal(err)
@@ -497,7 +572,13 @@ func TestReconcilePrunesVanishedOccupancy(t *testing.T) {
 	if !rep.OccupancyShift {
 		t.Fatalf("pruned camp not reported: %+v", rep)
 	}
+	if !rep.PresenceShift {
+		t.Fatalf("pruned plaque not reported: %+v", rep)
+	}
 	if a.Towns()[0].Occupancy.Occupied() {
 		t.Fatalf("camp outlived its repo: %+v", a.Towns()[0].Occupancy)
+	}
+	if a.Towns()[0].Run.Available() {
+		t.Fatalf("plaque outlived its repo: %+v", a.Towns()[0].Run)
 	}
 }
