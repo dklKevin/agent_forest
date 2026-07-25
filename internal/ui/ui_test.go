@@ -108,24 +108,56 @@ func TestScanAndUIReadEventsConcurrently(t *testing.T) {
 	a := &app.App{Dir: t.TempDir(), Settings: &store.Settings{}}
 	m := Model{app: a}
 
-	started := make(chan struct{})
-	done := make(chan error)
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	control := t.TempDir()
+	started := filepath.Join(control, "started")
+	release := filepath.Join(control, "release")
+	t.Cleanup(func() { _ = os.WriteFile(release, nil, 0o644) })
+	wrapper := filepath.Join(control, "git")
+	script := "#!/bin/sh\n" +
+		"if [ \"$4\" = \"rev-list\" ]; then\n" +
+		"  : > \"$SCAN_STARTED\"\n" +
+		"  while [ ! -e \"$SCAN_RELEASE\" ]; do sleep 0.01; done\n" +
+		"fi\n" +
+		"exec \"$REAL_GIT\" \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", control+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("REAL_GIT", realGit)
+	t.Setenv("SCAN_STARTED", started)
+	t.Setenv("SCAN_RELEASE", release)
+
+	done := make(chan error, 1)
 	go func() {
-		close(started)
 		_, err := a.RescanRepo(repo, time.Now())
 		done <- err
 	}()
-	<-started
 
-	reads := 0
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(started); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("scan did not reach git")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	_ = a.Towns()
+	_ = almanac.Fold(m.almanacEvents(), repo, time.Now())
+	if err := os.WriteFile(release, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	for {
 		select {
 		case err := <-done:
 			if err != nil {
 				t.Fatal(err)
-			}
-			if reads == 0 {
-				t.Fatal("scan finished before the UI could read")
 			}
 			if len(a.Towns()) != 1 {
 				t.Fatal("scan history did not build a town")
@@ -137,7 +169,6 @@ func TestScanAndUIReadEventsConcurrently(t *testing.T) {
 		default:
 			_ = a.Towns()
 			_ = almanac.Fold(m.almanacEvents(), repo, time.Now())
-			reads++
 		}
 	}
 }

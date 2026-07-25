@@ -390,6 +390,57 @@ func TestScanReadsAndClearsOccupancy(t *testing.T) {
 	}
 }
 
+func TestReconcilePersistenceFailurePublishesNoState(t *testing.T) {
+	t.Setenv("AGENTFOREST_HOME", t.TempDir())
+	root := t.TempDir()
+	keep := filepath.Join(root, "keep")
+	gone := filepath.Join(root, "gone")
+	mkRepo(t, keep, time.Now().Add(-48*time.Hour), "main.go", "package main")
+	mkRepo(t, gone, time.Now().Add(-48*time.Hour), "main.go", "package main")
+	gitIn(t, gone, nil, "checkout", "-q", "-b", "wip")
+
+	a, _ := Load()
+	if _, err := a.ConnectRoot(root, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	beforeEvents := a.EventsSnapshot()
+	if err := os.RemoveAll(gone); err != nil {
+		t.Fatal(err)
+	}
+	commitAt(t, keep, time.Now(), "main.go", "package main // committed")
+	if err := os.WriteFile(filepath.Join(keep, "main.go"), []byte("package main // working"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	blocked := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocked, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a.Dir = blocked
+
+	if _, err := a.Reconcile(time.Now()); err == nil {
+		t.Fatal("reconcile should fail when event persistence fails")
+	}
+	if got := len(a.EventsSnapshot()); got != len(beforeEvents) {
+		t.Fatalf("published %d events after persistence failure, had %d", got, len(beforeEvents))
+	}
+	towns := a.Towns()
+	if len(towns) != 2 {
+		t.Fatalf("towns = %d, want 2", len(towns))
+	}
+	for _, town := range towns {
+		switch town.Name {
+		case "keep":
+			if town.Occupancy.Occupied() {
+				t.Fatalf("published new occupancy after persistence failure: %+v", town.Occupancy)
+			}
+		case "gone":
+			if town.Occupancy.Branch != "wip" {
+				t.Fatalf("pruned occupancy after persistence failure: %+v", town.Occupancy)
+			}
+		}
+	}
+}
+
 // Occupancy is ephemeral by design: a relaunch knows nothing of it until a
 // scan reads it again, so a stale camp can never haunt a town from disk.
 func TestOccupancyDoesNotSurviveRelaunch(t *testing.T) {

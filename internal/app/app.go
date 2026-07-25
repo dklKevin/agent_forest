@@ -284,35 +284,20 @@ func (a *App) Reconcile(now time.Time) (ScanReport, error) {
 			kept = append(kept, r)
 		}
 	}
-	rep, err := a.scan(kept, now)
-	// Presence must never outlive its repo: a camp for a repository that is
-	// no longer discoverable (deleted, excluded, root removed) breaks here.
-	keptSet := map[string]bool{}
-	for _, r := range kept {
-		keptSet[r] = true
-	}
-	a.stateMu.Lock()
-	for path := range a.occupancy {
-		if !keptSet[path] {
-			delete(a.occupancy, path)
-			rep.OccupancyShift = true
-		}
-	}
-	a.stateMu.Unlock()
-	return rep, err
+	return a.scan(kept, now, true)
 }
 
 // RescanRepo reconciles a single repository: the live-update path while the
 // app is open.
 func (a *App) RescanRepo(path string, now time.Time) (ScanReport, error) {
-	return a.scan([]string{path}, now)
+	return a.scan([]string{path}, now, false)
 }
 
 // scan runs the git adapter over repos in parallel and appends whatever the
 // log is missing, in deterministic repo order. Each repo's working state is
 // read in the same pass and held in memory only: occupancy rides the scan
 // cadence, never the log.
-func (a *App) scan(repos []string, now time.Time) (ScanReport, error) {
+func (a *App) scan(repos []string, now time.Time, pruneMissing bool) (ScanReport, error) {
 	rep := ScanReport{Repos: len(repos)}
 	known := KnownByRepo(a.EventsSnapshot())
 
@@ -349,11 +334,10 @@ func (a *App) scan(repos []string, now time.Time) (ScanReport, error) {
 		}
 	}
 
-	// Persist history before publishing it. Occupancy still publishes if the
-	// append fails, matching its independent, in-memory-only behavior.
-	var appendErr error
 	if len(fresh) > 0 {
-		appendErr = store.AppendEvents(a.Dir, fresh)
+		if err := store.AppendEvents(a.Dir, fresh); err != nil {
+			return rep, err
+		}
 	}
 
 	a.stateMu.Lock()
@@ -366,14 +350,23 @@ func (a *App) scan(repos []string, now time.Time) (ScanReport, error) {
 		}
 		a.occupancy[r.repo] = r.occ
 	}
-	if appendErr == nil && len(fresh) > 0 {
+	if pruneMissing {
+		kept := make(map[string]bool, len(repos))
+		for _, repo := range repos {
+			kept[repo] = true
+		}
+		for path := range a.occupancy {
+			if !kept[path] {
+				delete(a.occupancy, path)
+				rep.OccupancyShift = true
+			}
+		}
+	}
+	if len(fresh) > 0 {
 		a.events = append(a.events, fresh...)
 		rep.NewEvents = len(fresh)
 	}
 	a.stateMu.Unlock()
-	if appendErr != nil {
-		return rep, appendErr
-	}
 	return rep, nil
 }
 
