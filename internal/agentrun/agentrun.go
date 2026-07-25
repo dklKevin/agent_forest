@@ -42,7 +42,9 @@ const (
 	maxDirEntries = 256
 	maxRunEntries = 64
 	maxFileBytes  = 1 << 20
-	maxScanBytes  = 16 << 20
+	maxOpenBytes  = maxRuns * maxFileBytes
+	maxGNHFBytes  = 16 << 20
+	maxScanBytes  = maxOpenBytes + maxGNHFBytes
 	maxLineBytes  = 64 << 10
 	maxTextRunes  = 240
 	maxSteps      = 12
@@ -139,11 +141,14 @@ func sameStrings(a, b []string) bool {
 // Read inspects the two documented local evidence roots and returns the newest
 // valid run. Bad, incomplete, unreadable, or symlinked entries are skipped.
 func Read(repo string, now time.Time) Presence {
-	return readWithBudget(repo, now, maxScanBytes)
+	return readWithBudgets(repo, now, maxOpenBytes, maxGNHFBytes)
 }
 
-func readWithBudget(repo string, now time.Time, limit int64) Presence {
-	budget := &readBudget{remaining: limit}
+func readWithBudgets(repo string, now time.Time, openLimit, gnhfLimit int64) Presence {
+	budgets := map[string]*readBudget{
+		".agentforest": {remaining: openLimit},
+		".gnhf":        {remaining: gnhfLimit},
+	}
 	type candidate struct {
 		dir      string
 		provider string
@@ -175,10 +180,6 @@ func readWithBudget(repo string, now time.Time, limit int64) Presence {
 		}
 		return candidates[i].at.After(candidates[j].at)
 	})
-	if len(candidates) > maxRuns {
-		candidates = candidates[:maxRuns]
-	}
-
 	var found []Presence
 	for _, item := range candidates {
 		info, err := os.Lstat(item.dir)
@@ -189,9 +190,9 @@ func readWithBudget(repo string, now time.Time, limit int64) Presence {
 		var ok bool
 		switch item.provider {
 		case ".agentforest":
-			p, ok = readOpenRun(item.dir, now, budget)
+			p, ok = readOpenRun(item.dir, now, budgets[item.provider])
 		case ".gnhf":
-			p, ok = readGNHFRun(item.dir, now, budget)
+			p, ok = readGNHFRun(item.dir, now, budgets[item.provider])
 		}
 		if ok {
 			found = append(found, p)

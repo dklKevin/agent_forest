@@ -304,30 +304,31 @@ func TestReadEnforcesAggregateByteBudgetAcrossRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p := readWithBudget(repo, now, 65)
+	p := readWithBudgets(repo, now, 65, 0)
 	if p.Available() {
 		t.Fatalf("later run escaped aggregate scan budget: %+v", p)
 	}
 }
 
-func TestReadBudgetRanksCandidatesAcrossProviders(t *testing.T) {
+func TestReadBudgetCannotBeExhaustedByAnotherProvider(t *testing.T) {
 	repo := t.TempDir()
 	now := time.Now().UTC()
-	openPath := openLog(repo, "older")
-	gnhfPath := filepath.Join(repo, ".gnhf", "runs", "newer", "iteration-1.jsonl")
 	gnhfLog := `{"type":"item.started"}` + "\n"
-	put(t, openPath, strings.Repeat("x", 64)+"\n")
+	openData := strings.Repeat("x", len(gnhfLog)-1) + "\n"
+	openPath := openLog(repo, "touched-stale")
+	gnhfPath := filepath.Join(repo, ".gnhf", "runs", "active", "iteration-1.jsonl")
+	put(t, openPath, openData)
 	put(t, gnhfPath, gnhfLog)
-	if err := os.Chtimes(openPath, now.Add(-time.Minute), now.Add(-time.Minute)); err != nil {
+	if err := os.Chtimes(openPath, now, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chtimes(gnhfPath, now, now); err != nil {
+	if err := os.Chtimes(gnhfPath, now.Add(-time.Minute), now.Add(-time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 
-	p := readWithBudget(repo, now, int64(len(gnhfLog)))
+	p := readWithBudgets(repo, now, int64(len(openData)), int64(len(gnhfLog)))
 	if p.Phase != Building || !p.Active {
-		t.Fatalf("older provider exhausted budget before newer evidence: %+v", p)
+		t.Fatalf("one provider exhausted another provider's budget: %+v", p)
 	}
 }
 
