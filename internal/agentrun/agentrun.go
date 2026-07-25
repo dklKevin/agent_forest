@@ -381,11 +381,35 @@ func safeReadDir(path string, limit int) ([]os.DirEntry, error) {
 	if err != nil || !os.SameFile(info, opened) || !opened.IsDir() {
 		return nil, errors.New("local evidence directory changed while opening")
 	}
-	entries, err := f.ReadDir(limit)
+	entries, err := f.ReadDir(-1)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	type rankedEntry struct {
+		entry os.DirEntry
+		at    time.Time
+	}
+	ranked := make([]rankedEntry, 0, len(entries))
+	for _, entry := range entries {
+		info, statErr := entry.Info()
+		if statErr != nil {
+			continue
+		}
+		ranked = append(ranked, rankedEntry{entry: entry, at: info.ModTime()})
+	}
+	sort.Slice(ranked, func(i, j int) bool {
+		if ranked[i].at.Equal(ranked[j].at) {
+			return ranked[i].entry.Name() < ranked[j].entry.Name()
+		}
+		return ranked[i].at.After(ranked[j].at)
+	})
+	if limit > 0 && len(ranked) > limit {
+		ranked = ranked[:limit]
+	}
+	entries = entries[:0]
+	for _, item := range ranked {
+		entries = append(entries, item.entry)
+	}
 	return entries, nil
 }
 

@@ -218,6 +218,29 @@ func TestNewestValidRunWins(t *testing.T) {
 	}
 }
 
+func TestNewestRunWinsBeyondDirectoryLimit(t *testing.T) {
+	repo := t.TempDir()
+	now := time.Now().UTC()
+	for i := 0; i < maxRuns; i++ {
+		path := openLog(repo, fmt.Sprintf("%02d-old", i))
+		put(t, path, event(now.Add(-time.Hour), Building, `"objective":"old"`))
+		old := now.Add(-2 * time.Hour)
+		if err := os.Chtimes(filepath.Dir(path), old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := openLog(repo, "zz-new")
+	put(t, path, event(now.Add(-time.Minute), Reviewing, `"objective":"new"`))
+	if err := os.Chtimes(filepath.Dir(path), now, now); err != nil {
+		t.Fatal(err)
+	}
+
+	p := Read(repo, now)
+	if p.Phase != Reviewing || p.Objective != "new" {
+		t.Fatalf("newest run beyond directory limit = %+v", p)
+	}
+}
+
 func TestFreshnessAndTerminalPhasesDoNotInventOngoingWork(t *testing.T) {
 	now := time.Now().UTC()
 	p := Presence{Phase: Building, Active: true, UpdatedAt: now.Add(-freshFor)}

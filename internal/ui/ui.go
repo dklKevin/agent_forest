@@ -442,7 +442,7 @@ func (m *Model) maybePoll() tea.Cmd {
 			continue // repo gone: it stands, and decays, on its history
 		}
 		fp := gitFP + ":" + agentrun.Fingerprint(path)
-		if old, ok := m.fps[path]; ok && old != fp {
+		if old, ok := m.fps[path]; !ok || old != fp {
 			changed = append(changed, path)
 		}
 		m.fps[path] = fp

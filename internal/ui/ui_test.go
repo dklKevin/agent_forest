@@ -291,6 +291,23 @@ func TestScanLiveAggregatesPresenceShift(t *testing.T) {
 	}
 }
 
+func TestFirstPollQueuesScanAfterStartup(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "busy")
+	mkUIRepo(t, repo)
+	town := uiRepoTown("busy", repo, false, "", time.Now())
+	a := &app.App{Dir: t.TempDir(), Settings: &store.Settings{}}
+	m := persistedUIModel(t, town, a)
+	m.scanning = false
+	m.lastPoll = time.Now().Add(-pollEvery)
+
+	if cmd := m.maybePoll(); cmd == nil {
+		t.Fatal("first poll only established a baseline instead of queueing a scan")
+	}
+	if _, ok := m.fps[repo]; !ok {
+		t.Fatal("first poll did not retain its fingerprint baseline")
+	}
+}
+
 func TestWorkPlaqueOpensOnlyFromInspectAndNamesPhase(t *testing.T) {
 	now := time.Now()
 	town := uiTown("keepsake", false, "", now)
