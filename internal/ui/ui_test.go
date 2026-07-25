@@ -254,7 +254,7 @@ func TestScanLiveAggregatesOccupancyShift(t *testing.T) {
 	}
 
 	gitInUI(t, repo, "checkout", "-q", "-b", "wip")
-	msg := scanCmd(a, scanLive, "", []string{key})().(scanDoneMsg)
+	msg := scanCmd(a, 1, scanLive, "", []string{key})().(scanDoneMsg)
 	if msg.err != nil {
 		t.Fatal(msg.err)
 	}
@@ -285,7 +285,7 @@ func TestScanLiveAggregatesPresenceShift(t *testing.T) {
 	if err := os.WriteFile(path, []byte(line), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	msg := scanCmd(a, scanLive, "", []string{key})().(scanDoneMsg)
+	msg := scanCmd(a, 1, scanLive, "", []string{key})().(scanDoneMsg)
 	if msg.err != nil || !msg.rep.PresenceShift {
 		t.Fatalf("live scan dropped presence shift: %+v", msg)
 	}
@@ -336,6 +336,103 @@ func TestFailedScanDoesNotSeedFingerprintBaseline(t *testing.T) {
 	m.lastPoll = time.Now().Add(-pollEvery)
 	if cmd := m.maybePoll(); cmd == nil {
 		t.Fatal("failed scan fingerprint suppressed the automatic retry")
+	}
+}
+
+func TestFailedLivePollRetriesUnchangedFingerprint(t *testing.T) {
+	t.Setenv("AGENTFOREST_HOME", t.TempDir())
+	root := t.TempDir()
+	repo := filepath.Join(root, "busy")
+	mkUIRepo(t, repo)
+
+	a, err := app.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.ConnectRoot(root, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	m := persistedUIModel(t, a.Towns()[0], a)
+	key := a.Towns()[0].Path
+	baseline := app.PollFingerprint(key)
+	mm, _ := m.scanDone(scanDoneMsg{
+		id: m.activeScan, kind: scanStartup,
+		rep: app.ScanReport{Fingerprints: map[string]string{key: baseline}},
+	})
+	m = mm.(Model)
+
+	if err := os.WriteFile(filepath.Join(repo, "main.go"), []byte("package main // changed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitInUI(t, repo, "add", "-A")
+	gitInUI(t, repo, "commit", "-q", "-m", "changed")
+	changed := app.PollFingerprint(key)
+	if changed == baseline {
+		t.Fatal("test setup did not change the repository fingerprint")
+	}
+
+	goodDir := a.Dir
+	blocked := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocked, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a.Dir = blocked
+	m.lastPoll = time.Now().Add(-pollEvery)
+	cmd := m.maybePoll()
+	if cmd == nil || !m.scanning || m.fps[key] != baseline {
+		t.Fatalf("live poll committed provisional cursor: scanning=%v cursor=%q", m.scanning, m.fps[key])
+	}
+	failed := cmd().(scanDoneMsg)
+	if failed.err == nil {
+		t.Fatal("live scan unexpectedly persisted into a non-directory")
+	}
+	mm, _ = m.scanDone(failed)
+	m = mm.(Model)
+	if m.scanning || m.fps[key] != baseline {
+		t.Fatalf("failed live scan advanced cursor: scanning=%v cursor=%q", m.scanning, m.fps[key])
+	}
+
+	a.Dir = goodDir
+	m.lastPoll = time.Now().Add(-pollEvery)
+	retry := m.maybePoll()
+	if retry == nil {
+		t.Fatal("unchanged failed evidence was not retried")
+	}
+	succeeded := retry().(scanDoneMsg)
+	if succeeded.err != nil {
+		t.Fatalf("retry failed: %v", succeeded.err)
+	}
+	mm, _ = m.scanDone(succeeded)
+	m = mm.(Model)
+	if m.fps[key] != changed {
+		t.Fatalf("successful retry did not commit cursor: got %q want %q", m.fps[key], changed)
+	}
+	m.lastPoll = time.Now().Add(-pollEvery)
+	if cmd := m.maybePoll(); cmd != nil {
+		t.Fatal("successful retry did not suppress a duplicate unchanged scan")
+	}
+}
+
+func TestStaleScanCompletionCannotOverwriteNewerSuccess(t *testing.T) {
+	m := Model{
+		fps:      map[string]string{"/repo": "old"},
+		scanning: true, scanSeq: 2, activeScan: 2,
+	}
+	mm, _ := m.scanDone(scanDoneMsg{
+		id: 1, kind: scanLive,
+		rep: app.ScanReport{Fingerprints: map[string]string{"/repo": "stale"}},
+	})
+	m = mm.(Model)
+	if !m.scanning || m.activeScan != 2 || m.fps["/repo"] != "old" {
+		t.Fatalf("stale completion disturbed newer scan: %+v", m)
+	}
+	mm, _ = m.scanDone(scanDoneMsg{
+		id: 2, kind: scanLive,
+		rep: app.ScanReport{Fingerprints: map[string]string{"/repo": "new"}},
+	})
+	m = mm.(Model)
+	if m.scanning || m.activeScan != 0 || m.fps["/repo"] != "new" {
+		t.Fatalf("newest completion did not publish: %+v", m)
 	}
 }
 

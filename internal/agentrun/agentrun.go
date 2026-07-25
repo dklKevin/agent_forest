@@ -156,18 +156,34 @@ func readWithBudgets(repo string, now time.Time, openLimit, gnhfLimit int64) Pre
 	}
 	var candidates []candidate
 	if root, ok := evidenceRoot(repo, ".agentforest"); ok {
-		for _, entry := range recentRunDirsOrEmpty(root) {
+		entries, err := recentRunDirs(root)
+		if err != nil {
+			return Presence{}
+		}
+		for _, entry := range entries {
 			dir := filepath.Join(root, entry.Name())
+			at, err := runEvidenceModTime(root, dir)
+			if err != nil {
+				return Presence{}
+			}
 			candidates = append(candidates, candidate{
-				dir: dir, provider: ".agentforest", at: runEvidenceModTime(root, dir),
+				dir: dir, provider: ".agentforest", at: at,
 			})
 		}
 	}
 	if root, ok := evidenceRoot(repo, ".gnhf"); ok {
-		for _, entry := range recentRunDirsOrEmpty(root) {
+		entries, err := recentRunDirs(root)
+		if err != nil {
+			return Presence{}
+		}
+		for _, entry := range entries {
 			dir := filepath.Join(root, entry.Name())
+			at, err := runEvidenceModTime(root, dir)
+			if err != nil {
+				return Presence{}
+			}
 			candidates = append(candidates, candidate{
-				dir: dir, provider: ".gnhf", at: runEvidenceModTime(root, dir),
+				dir: dir, provider: ".gnhf", at: at,
 			})
 		}
 	}
@@ -184,7 +200,7 @@ func readWithBudgets(repo string, now time.Time, openLimit, gnhfLimit int64) Pre
 	for _, item := range candidates {
 		info, err := os.Lstat(item.dir)
 		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			continue
+			return Presence{}
 		}
 		var p Presence
 		var ok bool
@@ -193,6 +209,9 @@ func readWithBudgets(repo string, now time.Time, openLimit, gnhfLimit int64) Pre
 			p, ok = readOpenRun(item.dir, now, budgets[item.provider])
 		case ".gnhf":
 			p, ok = readGNHFRun(item.dir, now, budgets[item.provider])
+		}
+		if budgets[item.provider].uncertain {
+			return Presence{}
 		}
 		if ok {
 			found = append(found, p)
@@ -205,14 +224,6 @@ func readWithBudgets(repo string, now time.Time, openLimit, gnhfLimit int64) Pre
 		return found[i].UpdatedAt.After(found[j].UpdatedAt)
 	})
 	return found[0]
-}
-
-func recentRunDirsOrEmpty(root string) []os.DirEntry {
-	entries, err := recentRunDirs(root)
-	if err != nil {
-		return nil
-	}
-	return entries
 }
 
 func evidenceRoot(repo, name string) (string, bool) {
@@ -241,17 +252,16 @@ type openEvent struct {
 }
 
 func readOpenRun(dir string, now time.Time, budget *readBudget) (Presence, bool) {
-	f, err := safeOpen(filepath.Join(dir, "events.jsonl"), budget)
+	data, err := safeReadFile(filepath.Join(dir, "events.jsonl"), budget)
 	if err != nil {
 		return Presence{}, false
 	}
-	defer f.Close()
 
 	var events []struct {
 		event openEvent
 		at    time.Time
 	}
-	forEachCompleteLine(f, func(line []byte) {
+	forEachCompleteLine(data, func(line []byte) {
 		var ev openEvent
 		if err := json.Unmarshal(line, &ev); err != nil {
 			return
@@ -315,6 +325,7 @@ type gnhfEvent struct {
 func readGNHFRun(dir string, now time.Time, budget *readBudget) (Presence, bool) {
 	entries, err := safeReadDir(dir, maxRunEntries)
 	if err != nil {
+		budget.uncertain = true
 		return Presence{}, false
 	}
 	var logs []string
@@ -340,7 +351,11 @@ func readGNHFRun(dir string, now time.Time, budget *readBudget) (Presence, bool)
 	// the plaque. Only the writer's curated iteration summaries cross the
 	// compatibility boundary.
 	p := Presence{}
-	summaries := noteSummaries(filepath.Join(dir, "notes.md"), budget)
+	summaries := map[int]string{}
+	notes := filepath.Join(dir, "notes.md")
+	if _, ok := regularEvidenceInfo(notes); ok {
+		summaries = noteSummaries(notes, budget)
+	}
 	for _, path := range logs {
 		phase, at, ok := readGNHFLog(path, now, budget)
 		if !ok {
@@ -378,7 +393,10 @@ func recentRunDirs(root string) ([]os.DirEntry, error) {
 		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			continue
 		}
-		at := runEvidenceModTime(root, dir)
+		at, err := runEvidenceModTime(root, dir)
+		if err != nil {
+			return nil, err
+		}
 		if at.IsZero() {
 			continue
 		}
@@ -391,7 +409,7 @@ func recentRunDirs(root string) ([]os.DirEntry, error) {
 		return candidates[i].at.After(candidates[j].at)
 	})
 	if len(candidates) > maxRuns {
-		candidates = candidates[:maxRuns]
+		return nil, errors.New("local evidence run count exceeds causal selection limit")
 	}
 	out := make([]os.DirEntry, len(candidates))
 	for i, item := range candidates {
@@ -400,16 +418,16 @@ func recentRunDirs(root string) ([]os.DirEntry, error) {
 	return out, nil
 }
 
-func runEvidenceModTime(root, dir string) time.Time {
+func runEvidenceModTime(root, dir string) (time.Time, error) {
 	if filepath.Base(filepath.Dir(root)) == ".agentforest" {
 		if info, ok := regularEvidenceInfo(filepath.Join(dir, "events.jsonl")); ok {
-			return info.ModTime()
+			return info.ModTime(), nil
 		}
-		return time.Time{}
+		return time.Time{}, nil
 	}
 	entries, err := safeReadDir(dir, maxRunEntries)
 	if err != nil {
-		return time.Time{}
+		return time.Time{}, err
 	}
 	var newest time.Time
 	for _, entry := range entries {
@@ -423,7 +441,7 @@ func runEvidenceModTime(root, dir string) time.Time {
 			newest = info.ModTime()
 		}
 	}
-	return newest
+	return newest, nil
 }
 
 func regularEvidenceInfo(path string) (os.FileInfo, bool) {
@@ -463,17 +481,15 @@ func fingerprintFiles(root, dir string) []string {
 }
 
 func readGNHFLog(path string, now time.Time, budget *readBudget) (Phase, time.Time, bool) {
-	f, err := safeOpen(path, budget)
+	data, info, err := safeReadFileInfo(path, budget)
 	if err != nil {
 		return "", time.Time{}, false
 	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil || info.ModTime().After(now.Add(futureLeeway)) {
+	if info.ModTime().After(now.Add(futureLeeway)) {
 		return "", time.Time{}, false
 	}
 	var sawTurn, sawItem, sawComplete bool
-	forEachCompleteLine(f, func(line []byte) {
+	forEachCompleteLine(data, func(line []byte) {
 		var ev gnhfEvent
 		if json.Unmarshal(line, &ev) != nil {
 			return
@@ -500,40 +516,81 @@ func readGNHFLog(path string, now time.Time, budget *readBudget) (Phase, time.Ti
 }
 
 type readBudget struct {
-	remaining int64
+	remaining  int64
+	consumed   int64
+	uncertain  bool
+	beforeRead func(string)
 }
 
-func (b *readBudget) take(size int64) bool {
+func (b *readBudget) canRead(size int64) bool {
 	if b == nil || size < 0 || size > b.remaining {
 		return false
 	}
-	b.remaining -= size
 	return true
 }
 
-func safeOpen(path string, budget *readBudget) (*os.File, error) {
+func (b *readBudget) charge(size int64) bool {
+	if !b.canRead(size) {
+		if b != nil {
+			b.uncertain = true
+		}
+		return false
+	}
+	b.remaining -= size
+	b.consumed += size
+	return true
+}
+
+func safeReadFile(path string, budget *readBudget) ([]byte, error) {
+	data, _, err := safeReadFileInfo(path, budget)
+	return data, err
+}
+
+// safeReadFileInfo consumes at most the descriptor size established before the
+// read and charges the bytes actually returned by the kernel. A writer may
+// append while the descriptor is open, but those bytes are neither consumed
+// nor parsed; observed growth makes this candidate uncertain and the enclosing
+// repository scan fails closed.
+func safeReadFileInfo(path string, budget *readBudget) ([]byte, os.FileInfo, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
-		return nil, err
+		budget.uncertain = true
+		return nil, nil, err
 	}
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > maxFileBytes {
-		return nil, errors.New("unsafe local evidence file")
+		return nil, nil, errors.New("unsafe local evidence file")
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		budget.uncertain = true
+		return nil, nil, err
 	}
+	defer f.Close()
 	opened, err := f.Stat()
 	if err != nil || !os.SameFile(info, opened) || !opened.Mode().IsRegular() ||
 		opened.Size() > maxFileBytes {
-		f.Close()
-		return nil, errors.New("local evidence changed while opening")
+		budget.uncertain = true
+		return nil, nil, errors.New("local evidence changed while opening")
 	}
-	if !budget.take(opened.Size()) {
-		f.Close()
-		return nil, errors.New("local evidence exceeds scan byte budget")
+	if !budget.canRead(opened.Size()) {
+		budget.uncertain = true
+		return nil, nil, errors.New("local evidence exceeds scan byte budget")
 	}
-	return f, nil
+	if budget.beforeRead != nil {
+		budget.beforeRead(path)
+	}
+	data, readErr := io.ReadAll(io.LimitReader(f, opened.Size()))
+	if !budget.charge(int64(len(data))) {
+		return nil, nil, errors.New("local evidence exceeds scan byte budget")
+	}
+	after, statErr := f.Stat()
+	if readErr != nil || statErr != nil || int64(len(data)) != opened.Size() ||
+		!os.SameFile(opened, after) || after.Size() != opened.Size() ||
+		!after.ModTime().Equal(opened.ModTime()) {
+		budget.uncertain = true
+		return nil, nil, errors.New("local evidence changed while reading")
+	}
+	return data, opened, nil
 }
 
 func safeReadDir(path string, limit int) ([]os.DirEntry, error) {
@@ -567,11 +624,7 @@ func safeReadDir(path string, limit int) ([]os.DirEntry, error) {
 // forEachCompleteLine consumes newline-terminated records only. Append-only
 // writers frequently leave the newest JSON object half-written; even a
 // momentarily valid object is not committed evidence until its newline lands.
-func forEachCompleteLine(r io.Reader, fn func([]byte)) {
-	data, err := io.ReadAll(io.LimitReader(r, maxFileBytes+1))
-	if err != nil || len(data) > maxFileBytes {
-		return
-	}
+func forEachCompleteLine(data []byte, fn func([]byte)) {
 	for len(data) > 0 {
 		i := bytes.IndexByte(data, '\n')
 		if i < 0 {
@@ -586,13 +639,12 @@ func forEachCompleteLine(r io.Reader, fn func([]byte)) {
 
 func noteSummaries(path string, budget *readBudget) map[int]string {
 	out := map[int]string{}
-	f, err := safeOpen(path, budget)
+	data, err := safeReadFile(path, budget)
 	if err != nil {
 		return out
 	}
-	defer f.Close()
 	var current int
-	forEachCompleteLine(f, func(raw []byte) {
+	forEachCompleteLine(data, func(raw []byte) {
 		line := strings.TrimSpace(string(raw))
 		if strings.HasPrefix(line, "### Iteration ") {
 			current, _ = strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "### Iteration ")))

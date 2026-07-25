@@ -87,6 +87,10 @@ quiet after fifteen minutes without new evidence. Evidence is never copied into
 AgentForest settings or history. Removing the local files removes the plaque on
 the next scan. The two reserved evidence trees do not themselves count as a
 dirty working tree; ordinary uncommitted files still pitch the usual camp.
+Selection causally compares at most 32 evidence-bearing runs per provider. If a
+root exceeds that limit, a byte budget is exhausted, or an evidence file changes
+while its bounded descriptor snapshot is being read, the whole plaque read fails
+closed instead of choosing a convenient but potentially stale run.
 
 ## Running it
 

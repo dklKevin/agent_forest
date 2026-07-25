@@ -242,29 +242,69 @@ func TestNewestValidRunWins(t *testing.T) {
 	}
 }
 
-func TestNewestRunWinsBeyondDirectoryLimit(t *testing.T) {
+func TestTouchedStaleRunsBeyondCausalLimitFailClosed(t *testing.T) {
 	repo := t.TempDir()
 	now := time.Now().UTC()
 	for i := 0; i < maxRuns; i++ {
 		path := openLog(repo, fmt.Sprintf("%02d-old", i))
-		put(t, path, event(now.Add(-time.Hour), Building, `"objective":"old"`))
-		stale := now.Add(-time.Hour)
-		if err := os.Chtimes(path, stale, stale); err != nil {
+		put(t, path, event(now.Add(-time.Hour-time.Duration(i)*time.Second), Planning,
+			fmt.Sprintf(`"objective":"stale-%02d"`, i)))
+		if err := os.Chtimes(path, now.Add(time.Duration(i)*time.Second), now.Add(time.Duration(i)*time.Second)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	path := openLog(repo, "zz-active")
-	put(t, path, event(now.Add(-time.Minute), Reviewing, `"objective":"new"`))
-	if err := os.Chtimes(filepath.Dir(path), now.Add(-2*time.Hour), now.Add(-2*time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chtimes(path, now, now); err != nil {
+	fresh := openLog(repo, "causally-newest")
+	put(t, fresh, event(now.Add(-time.Minute), Testing, `"objective":"fresh-should-win"`))
+	if err := os.Chtimes(fresh, now.Add(-2*time.Hour), now.Add(-2*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 
 	p := Read(repo, now)
-	if p.Phase != Reviewing || p.Objective != "new" {
-		t.Fatalf("newest run beyond directory limit = %+v", p)
+	if p.Available() {
+		t.Fatalf("overflow selected touched stale evidence instead of failing closed: %+v", p)
+	}
+}
+
+func TestCausalTimestampBeatsTouchedMtimeWithinRunLimit(t *testing.T) {
+	repo := t.TempDir()
+	now := time.Now().UTC()
+	for i := 0; i < maxRuns-1; i++ {
+		path := openLog(repo, fmt.Sprintf("%02d-stale", i))
+		put(t, path, event(now.Add(-time.Hour-time.Duration(i)*time.Second), Planning,
+			fmt.Sprintf(`"objective":"stale-%02d"`, i)))
+		if err := os.Chtimes(path, now.Add(time.Duration(i)*time.Second), now.Add(time.Duration(i)*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fresh := openLog(repo, "causally-newest")
+	put(t, fresh, event(now.Add(-time.Minute), Testing, `"objective":"fresh-should-win"`))
+	if err := os.Chtimes(fresh, now.Add(-2*time.Hour), now.Add(-2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	p := Read(repo, now)
+	if p.Phase != Testing || p.Objective != "fresh-should-win" {
+		t.Fatalf("file-touch order beat causal time: %+v", p)
+	}
+}
+
+func TestCausalNewestRunWinsAcrossProviders(t *testing.T) {
+	repo := t.TempDir()
+	now := time.Now().UTC()
+	openPath := openLog(repo, "fresh")
+	put(t, openPath, event(now.Add(-time.Minute), Testing, `"objective":"causally-fresh"`))
+	if err := os.Chtimes(openPath, now.Add(-2*time.Hour), now.Add(-2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	gnhfPath := filepath.Join(repo, ".gnhf", "runs", "touched-stale", "iteration-1.jsonl")
+	put(t, gnhfPath, `{"type":"item.started"}`+"\n")
+	if err := os.Chtimes(gnhfPath, now.Add(-time.Hour), now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	p := Read(repo, now)
+	if p.Phase != Testing || p.Objective != "causally-fresh" {
+		t.Fatalf("touched compatibility evidence starved causally newer run: %+v", p)
 	}
 }
 
@@ -280,12 +320,14 @@ func TestSafeReadDirKeepsHardTraversalLimit(t *testing.T) {
 
 func TestOverflowingGNHFRunFailsClosed(t *testing.T) {
 	repo := t.TempDir()
+	now := time.Now().UTC()
+	put(t, openLog(repo, "otherwise-visible"), event(now.Add(-time.Hour), Planning, `"objective":"must-not-leak"`))
 	run := filepath.Join(repo, ".gnhf", "runs", "overflow")
 	for i := 1; i <= maxRunEntries+1; i++ {
 		put(t, filepath.Join(run, fmt.Sprintf("iteration-%d.jsonl", i)),
 			`{"type":"thread.started"}`+"\n")
 	}
-	if p := Read(repo, time.Now().UTC()); p.Available() {
+	if p := Read(repo, now); p.Available() {
 		t.Fatalf("truncated run published a stale phase: %+v", p)
 	}
 }
@@ -404,11 +446,60 @@ func TestConcurrentAppendAndReadKeepsLastCompleteEvidence(t *testing.T) {
 	}()
 	for i := 0; i < 80; i++ {
 		p := Read(repo, now.Add(time.Minute))
-		if !p.Available() || (p.Phase != Planning && p.Phase != Building) {
-			t.Fatalf("concurrent read fabricated or lost all evidence: %+v", p)
+		if p.Available() && p.Phase != Planning && p.Phase != Building {
+			t.Fatalf("concurrent read fabricated evidence: %+v", p)
 		}
 	}
 	wg.Wait()
+	if p := Read(repo, now.Add(time.Minute)); !p.Available() || (p.Phase != Planning && p.Phase != Building) {
+		t.Fatalf("settled append-only evidence was not readable: %+v", p)
+	}
+}
+
+func TestConcurrentGrowthCannotExceedChargedBudgetOrPublishRecord(t *testing.T) {
+	repo := t.TempDir()
+	now := time.Now().UTC()
+	path := openLog(repo, "growing")
+	initial := event(now.Add(-time.Minute), Planning, `"objective":"within-budget"`)
+	appended := event(now, Reviewing, `"objective":"over-budget-must-not-appear"`)
+	put(t, path, initial)
+
+	budget := &readBudget{remaining: int64(len(initial))}
+	var once sync.Once
+	budget.beforeRead = func(got string) {
+		if got != path {
+			return
+		}
+		once.Do(func() {
+			f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.WriteString(appended); err != nil {
+				f.Close()
+				t.Fatal(err)
+			}
+			if err := f.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+
+	p, ok := readOpenRun(filepath.Dir(path), now, budget)
+	if ok || p.Available() || p.Phase == Reviewing ||
+		strings.Contains(p.Objective, "over-budget") {
+		t.Fatalf("concurrent growth affected visible presence: %+v", p)
+	}
+	if !budget.uncertain {
+		t.Fatal("concurrent descriptor growth was not detected")
+	}
+	if budget.consumed > int64(len(initial)) || budget.remaining < 0 {
+		t.Fatalf("read exceeded charged limit: consumed=%d remaining=%d limit=%d",
+			budget.consumed, budget.remaining, len(initial))
+	}
+	if budget.consumed != int64(len(initial)) {
+		t.Fatalf("actual bytes were not reconciled: consumed=%d want=%d", budget.consumed, len(initial))
+	}
 }
 
 func copyTree(src, dst string) error {

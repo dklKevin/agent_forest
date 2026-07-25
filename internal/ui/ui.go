@@ -87,6 +87,7 @@ const (
 )
 
 type scanDoneMsg struct {
+	id    uint64
 	kind  scanKind
 	rep   app.ScanReport
 	err   error
@@ -161,6 +162,8 @@ type Model struct {
 	inputMsg    string // result line under the input
 	scanning    bool   // one scan at a time; also pauses polling
 	startupScan bool   // Init reconciles once to catch up on closed-time commits
+	scanSeq     uint64 // monotonically identifies scans started by this model
+	activeScan  uint64 // only this completion may publish a polling cursor
 
 	fps         map[string]string // repo path -> cheap change fingerprint
 	lastPoll    time.Time
@@ -204,6 +207,8 @@ func New(cfg Config) Model {
 	if !cfg.Demo && cfg.App != nil && cfg.App.Connected() {
 		m.startupScan = true
 		m.scanning = true
+		m.scanSeq = 1
+		m.activeScan = 1
 	}
 	return m
 }
@@ -212,7 +217,7 @@ func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{tick(moveFPS)}
 	if m.startupScan {
 		// Catch up on whatever happened while the app was closed.
-		cmds = append(cmds, scanCmd(m.app, scanStartup, "", nil))
+		cmds = append(cmds, scanCmd(m.app, m.activeScan, scanStartup, "", nil))
 	}
 	return tea.Batch(cmds...)
 }
@@ -222,7 +227,7 @@ func tick(fps int) tea.Cmd {
 }
 
 // scanCmd runs the git adapter off the UI thread. Only one runs at a time.
-func scanCmd(a *app.App, kind scanKind, root string, paths []string) tea.Cmd {
+func scanCmd(a *app.App, id uint64, kind scanKind, root string, paths []string) tea.Cmd {
 	return func() tea.Msg {
 		now := time.Now()
 		var rep app.ScanReport
@@ -252,8 +257,15 @@ func scanCmd(a *app.App, kind scanKind, root string, paths []string) tea.Cmd {
 		default: // startup and manual refresh reconcile everything
 			rep, err = a.Reconcile(now)
 		}
-		return scanDoneMsg{kind: kind, rep: rep, err: err, root: root, paths: paths}
+		return scanDoneMsg{id: id, kind: kind, rep: rep, err: err, root: root, paths: paths}
 	}
+}
+
+func (m *Model) beginScan(kind scanKind, root string, paths []string) tea.Cmd {
+	m.scanSeq++
+	m.activeScan = m.scanSeq
+	m.scanning = true
+	return scanCmd(m.app, m.activeScan, kind, root, paths)
 }
 
 func (m Model) dotW() float64 { return float64(m.w * 2) }
@@ -449,13 +461,11 @@ func (m *Model) maybePoll() tea.Cmd {
 		if old, ok := m.fps[path]; !ok || old != fp {
 			changed = append(changed, path)
 		}
-		m.fps[path] = fp
 	}
 	if len(changed) == 0 {
 		return nil
 	}
-	m.scanning = true
-	return scanCmd(m.app, scanLive, "", changed)
+	return m.beginScan(scanLive, "", changed)
 }
 
 // stepRevives eases reviving towns, and reviving buildings, from their old
@@ -506,6 +516,14 @@ func (m *Model) stepRevives() {
 }
 
 func (m Model) scanDone(msg scanDoneMsg) (tea.Model, tea.Cmd) {
+	if msg.id != 0 && msg.id != m.activeScan {
+		// Bubble Tea normally serializes scans, but a delayed command result
+		// must never clear a newer in-flight scan or publish its stale cursor.
+		return m, nil
+	}
+	if msg.id != 0 {
+		m.activeScan = 0
+	}
 	m.scanning = false
 	// A persistence failure publishes none of the scan's event, occupancy,
 	// or run state. Do not publish its polling cursor either: keeping the old
@@ -825,9 +843,8 @@ func (m Model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "r":
 		if !m.demo && m.app != nil && !m.scanning && len(m.app.Settings.Roots) > 0 {
-			m.scanning = true
 			m.toast("walking the roots …")
-			return m, scanCmd(m.app, scanRefresh, "", nil)
+			return m, m.beginScan(scanRefresh, "", nil)
 		}
 	case "?":
 		if m.mode == helpView {
@@ -869,9 +886,8 @@ func (m Model) connectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				path = home + strings.TrimPrefix(path, "~")
 			}
 		}
-		m.scanning = true
 		m.inputMsg = ""
-		return m, scanCmd(m.app, scanConnect, path, nil)
+		return m, m.beginScan(scanConnect, path, nil)
 	case "backspace":
 		if r := []rune(m.input); len(r) > 0 {
 			m.input = string(r[:len(r)-1])
