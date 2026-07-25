@@ -94,6 +94,9 @@ func TestRefreshCountsQuickCommitsInSameSecond(t *testing.T) {
 	if !regexp.MustCompile(`new: .+ across 1 town\b`).MatchString(out) {
 		t.Fatalf("refresh did not attribute the new history to the town:\n%s", out)
 	}
+	if !strings.Contains(out, "changed[1]{name}:\n  active-app\n") {
+		t.Fatalf("refresh did not name the changed town:\n%s", out)
+	}
 
 	out, code = capture(t, func() int { return runCommand("towns", nil) })
 	if code != 0 {

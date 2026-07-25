@@ -235,6 +235,7 @@ func scanCmd(a *app.App, kind scanKind, root string, paths []string) tea.Cmd {
 				r, e := a.RescanRepo(p, now)
 				rep.Repos += r.Repos
 				rep.Changed += r.Changed
+				rep.ChangedRepos = append(rep.ChangedRepos, r.ChangedRepos...)
 				rep.NewEvents += r.NewEvents
 				rep.OccupancyShift = rep.OccupancyShift || r.OccupancyShift
 				rep.Errors = append(rep.Errors, r.Errors...)
@@ -567,8 +568,12 @@ func (m Model) scanDone(msg scanDoneMsg) (tea.Model, tea.Cmd) {
 			m.toast(revived[0] + " stirs")
 		case msg.kind == scanLive && len(revived) > 1:
 			m.toast(fmt.Sprintf("%d towns stir", len(revived)))
+		case msg.kind == scanLive && msg.rep.Changed == 1:
+			m.toast(m.liveTouchedName(msg.rep.ChangedRepos, msg.paths) + " was tended")
+		case msg.kind == scanLive && msg.rep.Changed > 1:
+			m.toast("the forest was tended")
 		case msg.kind == scanRefresh:
-			m.toast(fmt.Sprintf("refreshed · %d towns grew", msg.rep.Changed))
+			m.toast("refreshed · " + plural(msg.rep.Changed, "town") + " grew")
 		}
 	} else if msg.rep.OccupancyShift {
 		// No history landed, but a camp pitched or broke: rebuild so the
@@ -581,6 +586,19 @@ func (m Model) scanDone(msg scanDoneMsg) (tea.Model, tea.Cmd) {
 		m.toast("refreshed · nothing new")
 	}
 	return m, nil
+}
+
+func (m Model) liveTouchedName(changed, scanned []string) string {
+	paths := changed
+	if len(paths) == 0 {
+		paths = scanned
+	}
+	if len(paths) == 1 {
+		if s := m.siteByPath(paths[0]); s != nil {
+			return s.Town.Name
+		}
+	}
+	return "a town"
 }
 
 // beginPulse plays the since-last-visit pulse: towns that stirred while the
@@ -1073,6 +1091,15 @@ func (m Model) previewKey(k string) (bool, Model) {
 		return m
 	}
 	day := 24 * time.Hour
+	if t.Finished {
+		switch k {
+		case "+", "=", "-", "_", ">", ".", "<", ",", "]", "[", "1", "2", "3", "4", "5", "6":
+			return true, m
+		case "0":
+			t.IdleOverride = nil
+			return true, m
+		}
+	}
 	switch k {
 	case "+", "=":
 		return true, set(cur + day)
@@ -1490,8 +1517,17 @@ func (m Model) drawPreview() {
 		{idleLine, 150, 0},
 		{model.StageLine(model.StageOf(d), t.Finished), 175, 60},
 		{"", 0, 0},
-		{"+/- day   </> month   [/] year   1-6 stages", 115, 0},
-		{"0 back to real time   esc done", 115, 0},
+	}
+	if t.Finished {
+		lines = append(lines,
+			line{"kept monument · f returns to seasons", 115, 0},
+			line{"esc done", 115, 0},
+		)
+	} else {
+		lines = append(lines,
+			line{"+/- day   </> month   [/] year   1-6 stages", 115, 0},
+			line{"0 back to real time   esc done", 115, 0},
+		)
 	}
 	m.panel(lines)
 }
@@ -1580,7 +1616,8 @@ func (m Model) drawHelp() {
 		{"connect    c · add a root full of repositories", 150, 0},
 		{"exclude    x · hide the focused town", 150, 0},
 		{"refresh    r · rescan every root now", 150, 0},
-		{"quit       q", 150, 0},
+		{"close      esc or q", 150, 0},
+		{"quit       q from forest", 150, 0},
 	}
 	m.panel(lines)
 }
