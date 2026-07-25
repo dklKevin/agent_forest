@@ -42,6 +42,7 @@ const (
 	maxDirEntries = 256
 	maxRunEntries = 64
 	maxFileBytes  = 1 << 20
+	maxScanBytes  = 16 << 20
 	maxLineBytes  = 64 << 10
 	maxTextRunes  = 240
 	maxSteps      = 12
@@ -138,12 +139,17 @@ func sameStrings(a, b []string) bool {
 // Read inspects the two documented local evidence roots and returns the newest
 // valid run. Bad, incomplete, unreadable, or symlinked entries are skipped.
 func Read(repo string, now time.Time) Presence {
+	return readWithBudget(repo, now, maxScanBytes)
+}
+
+func readWithBudget(repo string, now time.Time, limit int64) Presence {
 	var found []Presence
+	budget := &readBudget{remaining: limit}
 	if root, ok := evidenceRoot(repo, ".agentforest"); ok {
-		found = append(found, readOpenRuns(root, now)...)
+		found = append(found, readOpenRuns(root, now, budget)...)
 	}
 	if root, ok := evidenceRoot(repo, ".gnhf"); ok {
-		found = append(found, readGNHFRuns(root, now)...)
+		found = append(found, readGNHFRuns(root, now, budget)...)
 	}
 	if len(found) == 0 {
 		return Presence{}
@@ -179,15 +185,18 @@ type openEvent struct {
 	Unresolved   []string `json:"unresolved"`
 }
 
-func readOpenRuns(root string, now time.Time) []Presence {
+func readOpenRuns(root string, now time.Time, budget *readBudget) []Presence {
 	return readRunDirs(root, func(dir string) (Presence, bool) {
-		f, err := safeOpen(filepath.Join(dir, "events.jsonl"))
+		f, err := safeOpen(filepath.Join(dir, "events.jsonl"), budget)
 		if err != nil {
 			return Presence{}, false
 		}
 		defer f.Close()
 
-		var p Presence
+		var events []struct {
+			event openEvent
+			at    time.Time
+		}
 		forEachCompleteLine(f, func(line []byte) {
 			var ev openEvent
 			if err := json.Unmarshal(line, &ev); err != nil {
@@ -197,10 +206,20 @@ func readOpenRuns(root string, now time.Time) []Presence {
 			if err != nil || !validPhase(ev.Phase) || at.After(now.Add(futureLeeway)) {
 				return
 			}
-			if p.UpdatedAt.IsZero() || !at.Before(p.UpdatedAt) {
-				p.Phase = ev.Phase
-				p.UpdatedAt = at
-			}
+			events = append(events, struct {
+				event openEvent
+				at    time.Time
+			}{event: ev, at: at})
+		})
+		sort.SliceStable(events, func(i, j int) bool {
+			return events[i].at.Before(events[j].at)
+		})
+
+		var p Presence
+		for _, item := range events {
+			ev, at := item.event, item.at
+			p.Phase = ev.Phase
+			p.UpdatedAt = at
 			if v := cleanText(ev.Objective); v != "" {
 				p.Objective = v
 			}
@@ -224,7 +243,7 @@ func readOpenRuns(root string, now time.Time) []Presence {
 					appendUnique(&p.Unresolved, v)
 				}
 			}
-		})
+		}
 		if !p.Available() {
 			return Presence{}, false
 		}
@@ -240,7 +259,7 @@ type gnhfEvent struct {
 	} `json:"item"`
 }
 
-func readGNHFRuns(root string, now time.Time) []Presence {
+func readGNHFRuns(root string, now time.Time, budget *readBudget) []Presence {
 	return readRunDirs(root, func(dir string) (Presence, bool) {
 		entries, err := safeReadDir(dir, maxRunEntries)
 		if err != nil {
@@ -269,9 +288,9 @@ func readGNHFRuns(root string, now time.Time) []Presence {
 		// the plaque. Only the writer's curated iteration summaries cross the
 		// compatibility boundary.
 		p := Presence{}
-		summaries := noteSummaries(filepath.Join(dir, "notes.md"))
+		summaries := noteSummaries(filepath.Join(dir, "notes.md"), budget)
 		for _, path := range logs {
-			phase, at, ok := readGNHFLog(path, now)
+			phase, at, ok := readGNHFLog(path, now, budget)
 			if !ok {
 				continue
 			}
@@ -414,8 +433,8 @@ func fingerprintFiles(root, dir string) []string {
 	return paths
 }
 
-func readGNHFLog(path string, now time.Time) (Phase, time.Time, bool) {
-	f, err := safeOpen(path)
+func readGNHFLog(path string, now time.Time, budget *readBudget) (Phase, time.Time, bool) {
+	f, err := safeOpen(path, budget)
 	if err != nil {
 		return "", time.Time{}, false
 	}
@@ -451,7 +470,19 @@ func readGNHFLog(path string, now time.Time) (Phase, time.Time, bool) {
 	}
 }
 
-func safeOpen(path string) (*os.File, error) {
+type readBudget struct {
+	remaining int64
+}
+
+func (b *readBudget) take(size int64) bool {
+	if b == nil || size < 0 || size > b.remaining {
+		return false
+	}
+	b.remaining -= size
+	return true
+}
+
+func safeOpen(path string, budget *readBudget) (*os.File, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
@@ -468,6 +499,10 @@ func safeOpen(path string) (*os.File, error) {
 		opened.Size() > maxFileBytes {
 		f.Close()
 		return nil, errors.New("local evidence changed while opening")
+	}
+	if !budget.take(opened.Size()) {
+		f.Close()
+		return nil, errors.New("local evidence exceeds scan byte budget")
 	}
 	return f, nil
 }
@@ -520,9 +555,9 @@ func forEachCompleteLine(r io.Reader, fn func([]byte)) {
 	}
 }
 
-func noteSummaries(path string) map[int]string {
+func noteSummaries(path string, budget *readBudget) map[int]string {
 	out := map[int]string{}
-	f, err := safeOpen(path)
+	f, err := safeOpen(path, budget)
 	if err != nil {
 		return out
 	}

@@ -59,6 +59,30 @@ func TestOpenFormatBuildsBoundedCuratedReplay(t *testing.T) {
 	}
 }
 
+func TestOpenFormatReplaysAllFieldsInTimestampOrder(t *testing.T) {
+	repo := t.TempDir()
+	now := time.Date(2026, 7, 25, 18, 0, 0, 0, time.UTC)
+	put(t, openLog(repo, "delayed"), strings.Join([]string{
+		event(now.Add(-time.Minute), Testing,
+			`"objective":"current","summary":"tested","paths":["new.go"],"verification":"passed","failure":"new failure","unresolved":["new item"]`),
+		event(now.Add(-2*time.Minute), Building,
+			`"objective":"old","summary":"built","paths":["old.go"],"verification":"failed","failure":"old failure","unresolved":["old item"]`),
+	}, ""))
+
+	p := Read(repo, now)
+	if p.Phase != Testing || p.Objective != "current" || p.Verification != "passed" {
+		t.Fatalf("newer fields were overwritten by delayed event: %+v", p)
+	}
+	if len(p.Steps) != 2 || p.Steps[0].Summary != "built" || p.Steps[1].Summary != "tested" {
+		t.Fatalf("steps are not chronological: %#v", p.Steps)
+	}
+	if strings.Join(p.Paths, ",") != "old.go,new.go" ||
+		strings.Join(p.Failures, ",") != "old failure,new failure" ||
+		strings.Join(p.Unresolved, ",") != "old item,new item" {
+		t.Fatalf("replay lists are not chronological: %+v", p)
+	}
+}
+
 func TestIncompleteMalformedFutureAndStaleEvidence(t *testing.T) {
 	now := time.Date(2026, 7, 25, 18, 0, 0, 0, time.UTC)
 	t.Run("partial final line is not evidence", func(t *testing.T) {
@@ -263,6 +287,26 @@ func TestOverflowingGNHFRunFailsClosed(t *testing.T) {
 	}
 	if p := Read(repo, time.Now().UTC()); p.Available() {
 		t.Fatalf("truncated run published a stale phase: %+v", p)
+	}
+}
+
+func TestReadEnforcesAggregateByteBudgetAcrossRuns(t *testing.T) {
+	repo := t.TempDir()
+	now := time.Now().UTC()
+	first := openLog(repo, "newer")
+	second := openLog(repo, "older")
+	put(t, first, strings.Repeat("x", 64)+"\n")
+	put(t, second, event(now.Add(-time.Minute), Planning, ""))
+	if err := os.Chtimes(first, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(second, now.Add(-time.Minute), now.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	p := readWithBudget(repo, now, 65)
+	if p.Available() {
+		t.Fatalf("later run escaped aggregate scan budget: %+v", p)
 	}
 }
 
