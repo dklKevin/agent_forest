@@ -15,13 +15,11 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/harmonica"
 
-	"github.com/dklKevin/agentforest/internal/agentrun"
 	"github.com/dklKevin/agentforest/internal/almanac"
 	"github.com/dklKevin/agentforest/internal/app"
 	"github.com/dklKevin/agentforest/internal/canvas"
 	"github.com/dklKevin/agentforest/internal/events"
 	"github.com/dklKevin/agentforest/internal/forest"
-	"github.com/dklKevin/agentforest/internal/gitscan"
 	"github.com/dklKevin/agentforest/internal/guidebook"
 	"github.com/dklKevin/agentforest/internal/model"
 )
@@ -241,6 +239,12 @@ func scanCmd(a *app.App, kind scanKind, root string, paths []string) tea.Cmd {
 				rep.OccupancyShift = rep.OccupancyShift || r.OccupancyShift
 				rep.PresenceShift = rep.PresenceShift || r.PresenceShift
 				rep.Errors = append(rep.Errors, r.Errors...)
+				if rep.Fingerprints == nil {
+					rep.Fingerprints = map[string]string{}
+				}
+				for path, fp := range r.Fingerprints {
+					rep.Fingerprints[path] = fp
+				}
 				if e != nil && err == nil {
 					err = e
 				}
@@ -437,11 +441,10 @@ func (m *Model) maybePoll() tea.Cmd {
 		if path == "" {
 			continue
 		}
-		gitFP := gitscan.Fingerprint(path)
-		if gitFP == "" {
+		fp := app.PollFingerprint(path)
+		if fp == "" {
 			continue // repo gone: it stands, and decays, on its history
 		}
-		fp := gitFP + ":" + agentrun.Fingerprint(path)
 		if old, ok := m.fps[path]; !ok || old != fp {
 			changed = append(changed, path)
 		}
@@ -503,6 +506,9 @@ func (m *Model) stepRevives() {
 
 func (m Model) scanDone(msg scanDoneMsg) (tea.Model, tea.Cmd) {
 	m.scanning = false
+	for path, fp := range msg.rep.Fingerprints {
+		m.fps[path] = fp
+	}
 	if msg.kind == scanConnect {
 		return m.connectDone(msg)
 	}

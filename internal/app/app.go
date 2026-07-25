@@ -249,10 +249,11 @@ func joinOr(list []string, empty string) string {
 
 // ScanReport summarizes one reconcile pass.
 type ScanReport struct {
-	Repos     int      // repositories scanned after excludes are applied
-	Changed   int      // repositories that produced new events
-	NewEvents int      // events appended to the log
-	Errors    []string // per-repo scan failures, "path: reason"
+	Repos        int      // repositories scanned after excludes are applied
+	Changed      int      // repositories that produced new events
+	NewEvents    int      // events appended to the log
+	Errors       []string // per-repo scan failures, "path: reason"
+	Fingerprints map[string]string
 	// OccupancyShift reports that some repo's working-state read changed in
 	// this pass, so camps need a world rebuild even when no events landed.
 	OccupancyShift bool
@@ -306,7 +307,7 @@ func (a *App) RescanRepo(path string, now time.Time) (ScanReport, error) {
 // read in the same pass and held in memory only: occupancy rides the scan
 // cadence, never the log.
 func (a *App) scan(repos []string, now time.Time, pruneMissing bool) (ScanReport, error) {
-	rep := ScanReport{Repos: len(repos)}
+	rep := ScanReport{Repos: len(repos), Fingerprints: make(map[string]string, len(repos))}
 	known := KnownByRepo(a.EventsSnapshot())
 
 	type result struct {
@@ -315,6 +316,7 @@ func (a *App) scan(repos []string, now time.Time, pruneMissing bool) (ScanReport
 		err  error
 		occ  gitscan.Occupancy
 		run  agentrun.Presence
+		fp   string
 	}
 	results := make([]result, len(repos))
 	var wg sync.WaitGroup
@@ -325,10 +327,11 @@ func (a *App) scan(repos []string, now time.Time, pruneMissing bool) (ScanReport
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			fp := PollFingerprint(repo)
 			evs, err := gitscan.Scan(repo, known[repo], now)
 			results[i] = result{
 				repo: repo, evs: evs, err: err,
-				occ: gitscan.ReadOccupancy(repo), run: agentrun.Read(repo, now),
+				occ: gitscan.ReadOccupancy(repo), run: agentrun.Read(repo, now), fp: fp,
 			}
 		}(i, repo)
 	}
@@ -336,6 +339,9 @@ func (a *App) scan(repos []string, now time.Time, pruneMissing bool) (ScanReport
 
 	var fresh []events.Event
 	for _, r := range results {
+		if r.fp != "" {
+			rep.Fingerprints[r.repo] = r.fp
+		}
 		if r.err != nil {
 			rep.Errors = append(rep.Errors, r.repo+": "+r.err.Error())
 			continue
@@ -397,6 +403,14 @@ func (a *App) scan(repos []string, now time.Time, pruneMissing bool) (ScanReport
 	}
 	a.stateMu.Unlock()
 	return rep, nil
+}
+
+func PollFingerprint(repo string) string {
+	gitFP := gitscan.Fingerprint(repo)
+	if gitFP == "" {
+		return ""
+	}
+	return gitFP + ":" + agentrun.Fingerprint(repo)
 }
 
 // KnownByRepo derives, per repository, what the event log already recorded:

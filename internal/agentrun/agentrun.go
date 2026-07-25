@@ -36,14 +36,16 @@ const (
 )
 
 const (
-	freshFor     = 15 * time.Minute
-	futureLeeway = 2 * time.Minute
-	maxRuns      = 32
-	maxFileBytes = 1 << 20
-	maxLineBytes = 64 << 10
-	maxTextRunes = 240
-	maxSteps     = 12
-	maxList      = 24
+	freshFor      = 15 * time.Minute
+	futureLeeway  = 2 * time.Minute
+	maxRuns       = 32
+	maxDirEntries = 256
+	maxRunEntries = 64
+	maxFileBytes  = 1 << 20
+	maxLineBytes  = 64 << 10
+	maxTextRunes  = 240
+	maxSteps      = 12
+	maxList       = 24
 )
 
 var phaseNames = map[Phase]string{
@@ -240,7 +242,7 @@ type gnhfEvent struct {
 
 func readGNHFRuns(root string, now time.Time) []Presence {
 	return readRunDirs(root, func(dir string) (Presence, bool) {
-		entries, err := safeReadDir(dir, maxSteps+4)
+		entries, err := safeReadDir(dir, maxRunEntries)
 		if err != nil {
 			return Presence{}, false
 		}
@@ -288,7 +290,7 @@ func readGNHFRuns(root string, now time.Time) []Presence {
 }
 
 func readRunDirs(root string, read func(string) (Presence, bool)) []Presence {
-	entries, err := safeReadDir(root, maxRuns)
+	entries, err := recentRunDirs(root)
 	if err != nil {
 		return nil
 	}
@@ -307,6 +309,109 @@ func readRunDirs(root string, read func(string) (Presence, bool)) []Presence {
 		}
 	}
 	return out
+}
+
+func recentRunDirs(root string) ([]os.DirEntry, error) {
+	entries, err := safeReadDir(root, maxDirEntries)
+	if err != nil {
+		return nil, err
+	}
+	type candidate struct {
+		entry os.DirEntry
+		at    time.Time
+	}
+	candidates := make([]candidate, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		dir := filepath.Join(root, entry.Name())
+		info, err := os.Lstat(dir)
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		at := runEvidenceModTime(root, dir)
+		if at.IsZero() {
+			continue
+		}
+		candidates = append(candidates, candidate{entry: entry, at: at})
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].at.Equal(candidates[j].at) {
+			return candidates[i].entry.Name() < candidates[j].entry.Name()
+		}
+		return candidates[i].at.After(candidates[j].at)
+	})
+	if len(candidates) > maxRuns {
+		candidates = candidates[:maxRuns]
+	}
+	out := make([]os.DirEntry, len(candidates))
+	for i, item := range candidates {
+		out[i] = item.entry
+	}
+	return out, nil
+}
+
+func runEvidenceModTime(root, dir string) time.Time {
+	if filepath.Base(filepath.Dir(root)) == ".agentforest" {
+		if info, ok := regularEvidenceInfo(filepath.Join(dir, "events.jsonl")); ok {
+			return info.ModTime()
+		}
+		return time.Time{}
+	}
+	entries, err := safeReadDir(dir, maxRunEntries)
+	if err != nil {
+		return time.Time{}
+	}
+	var newest time.Time
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 ||
+			!strings.HasPrefix(name, "iteration-") || !strings.HasSuffix(name, ".jsonl") {
+			continue
+		}
+		info, err := entry.Info()
+		if err == nil && info.Mode().IsRegular() && info.ModTime().After(newest) {
+			newest = info.ModTime()
+		}
+	}
+	return newest
+}
+
+func regularEvidenceInfo(path string) (os.FileInfo, bool) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, false
+	}
+	return info, true
+}
+
+func fingerprintFiles(root, dir string) []string {
+	if filepath.Base(filepath.Dir(root)) == ".agentforest" {
+		path := filepath.Join(dir, "events.jsonl")
+		if _, ok := regularEvidenceInfo(path); ok {
+			return []string{path}
+		}
+		return nil
+	}
+	var paths []string
+	notes := filepath.Join(dir, "notes.md")
+	if _, ok := regularEvidenceInfo(notes); ok {
+		paths = append(paths, notes)
+	}
+	entries, err := safeReadDir(dir, maxRunEntries)
+	if err != nil {
+		return paths
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 ||
+			!strings.HasPrefix(name, "iteration-") || !strings.HasSuffix(name, ".jsonl") {
+			continue
+		}
+		paths = append(paths, filepath.Join(dir, name))
+	}
+	return paths
 }
 
 func readGNHFLog(path string, now time.Time) (Phase, time.Time, bool) {
@@ -368,6 +473,9 @@ func safeOpen(path string) (*os.File, error) {
 }
 
 func safeReadDir(path string, limit int) ([]os.DirEntry, error) {
+	if limit <= 0 {
+		return nil, errors.New("local evidence directory limit must be positive")
+	}
 	info, err := os.Lstat(path)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return nil, errors.New("unsafe local evidence directory")
@@ -381,35 +489,11 @@ func safeReadDir(path string, limit int) ([]os.DirEntry, error) {
 	if err != nil || !os.SameFile(info, opened) || !opened.IsDir() {
 		return nil, errors.New("local evidence directory changed while opening")
 	}
-	entries, err := f.ReadDir(-1)
+	entries, err := f.ReadDir(limit)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
-	type rankedEntry struct {
-		entry os.DirEntry
-		at    time.Time
-	}
-	ranked := make([]rankedEntry, 0, len(entries))
-	for _, entry := range entries {
-		info, statErr := entry.Info()
-		if statErr != nil {
-			continue
-		}
-		ranked = append(ranked, rankedEntry{entry: entry, at: info.ModTime()})
-	}
-	sort.Slice(ranked, func(i, j int) bool {
-		if ranked[i].at.Equal(ranked[j].at) {
-			return ranked[i].entry.Name() < ranked[j].entry.Name()
-		}
-		return ranked[i].at.After(ranked[j].at)
-	})
-	if limit > 0 && len(ranked) > limit {
-		ranked = ranked[:limit]
-	}
-	entries = entries[:0]
-	for _, item := range ranked {
-		entries = append(entries, item.entry)
-	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	return entries, nil
 }
 
@@ -532,7 +616,7 @@ func Fingerprint(repo string) string {
 		if !ok {
 			continue
 		}
-		runs, err := safeReadDir(root, maxRuns)
+		runs, err := recentRunDirs(root)
 		if err != nil {
 			continue
 		}
@@ -541,17 +625,9 @@ func Fingerprint(repo string) string {
 				continue
 			}
 			dir := filepath.Join(root, run.Name())
-			files, err := safeReadDir(dir, maxSteps+4)
-			if err != nil {
-				continue
-			}
-			for _, file := range files {
-				if file.IsDir() || file.Type()&os.ModeSymlink != 0 {
-					continue
-				}
-				path := filepath.Join(dir, file.Name())
-				info, err := os.Lstat(path)
-				if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			for _, path := range fingerprintFiles(root, dir) {
+				info, ok := regularEvidenceInfo(path)
+				if !ok {
 					continue
 				}
 				rel, _ := filepath.Rel(repo, path)

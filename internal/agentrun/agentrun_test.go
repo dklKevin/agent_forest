@@ -224,20 +224,37 @@ func TestNewestRunWinsBeyondDirectoryLimit(t *testing.T) {
 	for i := 0; i < maxRuns; i++ {
 		path := openLog(repo, fmt.Sprintf("%02d-old", i))
 		put(t, path, event(now.Add(-time.Hour), Building, `"objective":"old"`))
-		old := now.Add(-2 * time.Hour)
-		if err := os.Chtimes(filepath.Dir(path), old, old); err != nil {
+		stale := now.Add(-time.Hour)
+		if err := os.Chtimes(path, stale, stale); err != nil {
 			t.Fatal(err)
 		}
 	}
-	path := openLog(repo, "zz-new")
+	path := openLog(repo, "zz-active")
 	put(t, path, event(now.Add(-time.Minute), Reviewing, `"objective":"new"`))
-	if err := os.Chtimes(filepath.Dir(path), now, now); err != nil {
+	if err := os.Chtimes(filepath.Dir(path), now.Add(-2*time.Hour), now.Add(-2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, now, now); err != nil {
 		t.Fatal(err)
 	}
 
 	p := Read(repo, now)
 	if p.Phase != Reviewing || p.Objective != "new" {
 		t.Fatalf("newest run beyond directory limit = %+v", p)
+	}
+}
+
+func TestSafeReadDirKeepsHardTraversalLimit(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 20; i++ {
+		put(t, filepath.Join(dir, fmt.Sprintf("%02d", i)), "x")
+	}
+	entries, err := safeReadDir(dir, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 7 {
+		t.Fatalf("entries = %d, want hard limit 7", len(entries))
 	}
 }
 

@@ -289,22 +289,30 @@ func TestScanLiveAggregatesPresenceShift(t *testing.T) {
 	if msg.err != nil || !msg.rep.PresenceShift {
 		t.Fatalf("live scan dropped presence shift: %+v", msg)
 	}
+	if msg.rep.Fingerprints[key] == "" {
+		t.Fatal("live scan dropped its pre-scan fingerprint")
+	}
 }
 
-func TestFirstPollQueuesScanAfterStartup(t *testing.T) {
+func TestStartupScanSeedsFirstPollBaseline(t *testing.T) {
 	repo := filepath.Join(t.TempDir(), "busy")
 	mkUIRepo(t, repo)
 	town := uiRepoTown("busy", repo, false, "", time.Now())
 	a := &app.App{Dir: t.TempDir(), Settings: &store.Settings{}}
 	m := persistedUIModel(t, town, a)
-	m.scanning = false
+	fp := app.PollFingerprint(repo)
+	mm, _ := m.scanDone(scanDoneMsg{
+		kind: scanStartup,
+		rep:  app.ScanReport{Fingerprints: map[string]string{repo: fp}},
+	})
+	m = mm.(Model)
 	m.lastPoll = time.Now().Add(-pollEvery)
 
-	if cmd := m.maybePoll(); cmd == nil {
-		t.Fatal("first poll only established a baseline instead of queueing a scan")
+	if cmd := m.maybePoll(); cmd != nil {
+		t.Fatal("first poll repeated the startup scan without a filesystem change")
 	}
-	if _, ok := m.fps[repo]; !ok {
-		t.Fatal("first poll did not retain its fingerprint baseline")
+	if m.fps[repo] != fp {
+		t.Fatal("startup scan did not publish its fingerprint baseline")
 	}
 }
 
