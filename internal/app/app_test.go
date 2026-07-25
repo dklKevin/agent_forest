@@ -227,8 +227,9 @@ func TestUnfinishIgnoresLegacySettingsCleanupFailure(t *testing.T) {
 	if a.Settings.IsFinished(key) {
 		t.Fatal("legacy settings entry was not retired in memory")
 	}
-	if len(a.Events) != 1 || a.Events[0].Kind != events.KindUnfinish || !a.Events[0].TS.Equal(now) {
-		t.Fatalf("unfinish event was not kept in memory: %+v", a.Events)
+	gotEvents := a.EventsSnapshot()
+	if len(gotEvents) != 1 || gotEvents[0].Kind != events.KindUnfinish || !gotEvents[0].TS.Equal(now) {
+		t.Fatalf("unfinish event was not kept in memory: %+v", gotEvents)
 	}
 	evs, skipped, err := store.LoadEvents(dir)
 	if err != nil {
@@ -357,7 +358,7 @@ func TestScanReadsAndClearsOccupancy(t *testing.T) {
 	if !town.Occupancy.Dirty || town.Occupancy.Branch != "wip" {
 		t.Fatalf("occupancy not attached: %+v", town.Occupancy)
 	}
-	for _, e := range a.Events {
+	for _, e := range a.EventsSnapshot() {
 		switch e.Kind {
 		case events.KindRepo, events.KindActivity, events.KindTag, events.KindLangs, events.KindComp:
 		default:

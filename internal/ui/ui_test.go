@@ -10,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/dklKevin/agentforest/internal/almanac"
 	"github.com/dklKevin/agentforest/internal/app"
 	"github.com/dklKevin/agentforest/internal/canvas"
 	"github.com/dklKevin/agentforest/internal/demo"
@@ -96,6 +97,49 @@ func mkUIRepo(t *testing.T, dir string) {
 	}
 	gitInUI(t, dir, "add", "-A")
 	gitInUI(t, dir, "commit", "-q", "-m", "c")
+}
+
+// The scan command runs away from Bubble Tea's UI goroutine. Town building
+// and the almanac must both read one guarded event snapshot while that scan
+// publishes newly discovered history.
+func TestScanAndUIReadEventsConcurrently(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "live")
+	mkUIRepo(t, repo)
+	a := &app.App{Dir: t.TempDir(), Settings: &store.Settings{}}
+	m := Model{app: a}
+
+	started := make(chan struct{})
+	done := make(chan error)
+	go func() {
+		close(started)
+		_, err := a.RescanRepo(repo, time.Now())
+		done <- err
+	}()
+	<-started
+
+	reads := 0
+	for {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+			if reads == 0 {
+				t.Fatal("scan finished before the UI could read")
+			}
+			if len(a.Towns()) != 1 {
+				t.Fatal("scan history did not build a town")
+			}
+			if almanac.Fold(m.almanacEvents(), repo, time.Now()) == nil {
+				t.Fatal("scan history did not build an almanac")
+			}
+			return
+		default:
+			_ = a.Towns()
+			_ = almanac.Fold(m.almanacEvents(), repo, time.Now())
+			reads++
+		}
+	}
 }
 
 // The occupancy line lives in inspect and only while the working tree holds

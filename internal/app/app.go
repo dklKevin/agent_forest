@@ -25,15 +25,14 @@ type App struct {
 	Dir         string
 	Settings    *store.Settings
 	HasSettings bool // settings.json existed; false means first run
-	Events      []events.Event
-	Skipped     int // unreadable event-log lines skipped while loading
+	Skipped     int  // unreadable event-log lines skipped while loading
 
-	// occupancy is each repo's working state as of the latest scan: in
-	// memory only, by design. It never touches the event log or settings, so
-	// a camp can only exist while a scan just saw the work standing. The scan
-	// goroutine writes and prunes it while the UI goroutine reads it through
-	// Towns(); occMu guards every one of those accesses.
-	occMu     sync.Mutex
+	// events and occupancy cross together from the scan goroutine to the UI.
+	// stateMu guards every access and lets Towns copy one consistent view.
+	// Event entries are immutable after publication, so copying the slice is
+	// sufficient; occupancy is copied because its map is updated in place.
+	stateMu   sync.RWMutex
+	events    []events.Event
 	occupancy map[string]gitscan.Occupancy
 }
 
@@ -52,7 +51,7 @@ func Load() (*App, error) {
 		return nil, err
 	}
 	evs = synthesizeLegacyFinishes(evs, s.Finished)
-	return &App{Dir: dir, Settings: s, HasSettings: found, Events: evs, Skipped: skipped}, nil
+	return &App{Dir: dir, Settings: s, HasSettings: found, events: evs, Skipped: skipped}, nil
 }
 
 // synthesizeLegacyFinishes folds settings.json's old finished list into the
@@ -89,7 +88,10 @@ func synthesizeLegacyFinishes(evs []events.Event, finished []string) []events.Ev
 // Connected reports whether any real forest exists yet: a root to scan or
 // history already in the log. When false, the world falls back to the demo.
 func (a *App) Connected() bool {
-	return len(a.Settings.Roots) > 0 || len(a.Events) > 0
+	a.stateMu.RLock()
+	hasEvents := len(a.events) > 0
+	a.stateMu.RUnlock()
+	return len(a.Settings.Roots) > 0 || hasEvents
 }
 
 // Towns folds the event log into towns, oldest first. Excluded repos are
@@ -97,8 +99,8 @@ func (a *App) Connected() bool {
 // them later costs nothing. Finish state and epitaphs are derived state,
 // folded from the log's finish/unfinish events.
 func (a *App) Towns() []*model.Town {
-	repos := events.Reduce(a.Events)
-	occ := a.occupancySnapshot()
+	evs, occ := a.townSnapshot()
+	repos := events.Reduce(evs)
 	towns := make([]*model.Town, 0, len(repos))
 	for _, r := range repos {
 		if r.Path != "" && a.Settings.IsExcluded(r.Path) {
@@ -113,20 +115,30 @@ func (a *App) Towns() []*model.Town {
 	return towns
 }
 
-// occupancySnapshot copies the occupancy map under occMu, so the map is never
-// read while the scan goroutine writes or prunes it. The lock is held only for
-// the copy, never across the town-building loop or any git or store I/O.
-func (a *App) occupancySnapshot() map[string]gitscan.Occupancy {
-	a.occMu.Lock()
-	defer a.occMu.Unlock()
+// EventsSnapshot returns the immutable event entries in a copied slice. UI
+// folds can keep the snapshot for their whole operation without holding a
+// lock or observing a scan's append halfway through.
+func (a *App) EventsSnapshot() []events.Event {
+	a.stateMu.RLock()
+	defer a.stateMu.RUnlock()
+	return append([]events.Event(nil), a.events...)
+}
+
+// townSnapshot copies the event slice and occupancy map under one read lock.
+// The lock is held only for the copies, never across reducing, rendering, git,
+// or store I/O.
+func (a *App) townSnapshot() ([]events.Event, map[string]gitscan.Occupancy) {
+	a.stateMu.RLock()
+	defer a.stateMu.RUnlock()
+	evs := append([]events.Event(nil), a.events...)
 	if len(a.occupancy) == 0 {
-		return nil
+		return evs, nil
 	}
 	snap := make(map[string]gitscan.Occupancy, len(a.occupancy))
 	for k, v := range a.occupancy {
 		snap[k] = v
 	}
-	return snap
+	return evs, snap
 }
 
 // EpitaphMaxRunes is the carving limit. An epitaph is carved, not written:
@@ -160,7 +172,9 @@ func (a *App) Finish(path, epitaph string, now time.Time) error {
 	if err := store.AppendEvents(a.Dir, []events.Event{ev}); err != nil {
 		return err
 	}
-	a.Events = append(a.Events, ev)
+	a.stateMu.Lock()
+	a.events = append(a.events, ev)
+	a.stateMu.Unlock()
 	return nil
 }
 
@@ -173,7 +187,9 @@ func (a *App) Unfinish(path string, now time.Time) error {
 	if err := store.AppendEvents(a.Dir, []events.Event{ev}); err != nil {
 		return err
 	}
-	a.Events = append(a.Events, ev)
+	a.stateMu.Lock()
+	a.events = append(a.events, ev)
+	a.stateMu.Unlock()
 	if a.Settings.SetFinished(path, false) {
 		_ = store.SaveSettings(a.Dir, a.Settings)
 	}
@@ -184,8 +200,9 @@ func (a *App) Unfinish(path string, now time.Time) error {
 // log. Exact path wins; otherwise a unique town name matches. Excluded repos
 // are still findable, so they can be restored.
 func (a *App) FindTown(nameOrPath string) (string, error) {
+	evs := a.EventsSnapshot()
 	if c, err := gitscan.Canonical(nameOrPath); err == nil {
-		for _, r := range events.Reduce(a.Events) {
+		for _, r := range events.Reduce(evs) {
 			if r.Path == c {
 				return c, nil
 			}
@@ -193,7 +210,7 @@ func (a *App) FindTown(nameOrPath string) (string, error) {
 	}
 	var matches []string
 	var names []string
-	for _, r := range events.Reduce(a.Events) {
+	for _, r := range events.Reduce(evs) {
 		names = append(names, r.Name)
 		if r.Name == nameOrPath {
 			matches = append(matches, r.Path)
@@ -274,14 +291,14 @@ func (a *App) Reconcile(now time.Time) (ScanReport, error) {
 	for _, r := range kept {
 		keptSet[r] = true
 	}
-	a.occMu.Lock()
+	a.stateMu.Lock()
 	for path := range a.occupancy {
 		if !keptSet[path] {
 			delete(a.occupancy, path)
 			rep.OccupancyShift = true
 		}
 	}
-	a.occMu.Unlock()
+	a.stateMu.Unlock()
 	return rep, err
 }
 
@@ -297,7 +314,7 @@ func (a *App) RescanRepo(path string, now time.Time) (ScanReport, error) {
 // cadence, never the log.
 func (a *App) scan(repos []string, now time.Time) (ScanReport, error) {
 	rep := ScanReport{Repos: len(repos)}
-	known := KnownByRepo(a.Events)
+	known := KnownByRepo(a.EventsSnapshot())
 
 	type result struct {
 		repo string
@@ -320,16 +337,8 @@ func (a *App) scan(repos []string, now time.Time) (ScanReport, error) {
 	}
 	wg.Wait()
 
-	a.occMu.Lock()
-	if a.occupancy == nil {
-		a.occupancy = map[string]gitscan.Occupancy{}
-	}
 	var fresh []events.Event
 	for _, r := range results {
-		if a.occupancy[r.repo] != r.occ {
-			rep.OccupancyShift = true
-		}
-		a.occupancy[r.repo] = r.occ
 		if r.err != nil {
 			rep.Errors = append(rep.Errors, r.repo+": "+r.err.Error())
 			continue
@@ -339,13 +348,31 @@ func (a *App) scan(repos []string, now time.Time) (ScanReport, error) {
 			fresh = append(fresh, r.evs...)
 		}
 	}
-	a.occMu.Unlock()
+
+	// Persist history before publishing it. Occupancy still publishes if the
+	// append fails, matching its independent, in-memory-only behavior.
+	var appendErr error
 	if len(fresh) > 0 {
-		if err := store.AppendEvents(a.Dir, fresh); err != nil {
-			return rep, err
+		appendErr = store.AppendEvents(a.Dir, fresh)
+	}
+
+	a.stateMu.Lock()
+	if a.occupancy == nil {
+		a.occupancy = map[string]gitscan.Occupancy{}
+	}
+	for _, r := range results {
+		if a.occupancy[r.repo] != r.occ {
+			rep.OccupancyShift = true
 		}
-		a.Events = append(a.Events, fresh...)
+		a.occupancy[r.repo] = r.occ
+	}
+	if appendErr == nil && len(fresh) > 0 {
+		a.events = append(a.events, fresh...)
 		rep.NewEvents = len(fresh)
+	}
+	a.stateMu.Unlock()
+	if appendErr != nil {
+		return rep, appendErr
 	}
 	return rep, nil
 }
