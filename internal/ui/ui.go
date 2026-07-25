@@ -33,9 +33,9 @@ const (
 	// invisible.
 	moveFPS = 15
 	idleFPS = 6
-	// pollEvery is how often connected repos are checked for new commits
-	// while the app is open. The check is stat-only (no processes spawned),
-	// so it costs microseconds.
+	// pollEvery is how often connected repos are checked for git or local-run
+	// evidence changes while the app is open. The check reads filesystem
+	// metadata and a few small control files without spawning processes.
 	pollEvery = 2500 * time.Millisecond
 	// reviveDur is how long a town takes to shake off decay and show tended
 	// traces again when a new commit lands.
@@ -83,7 +83,7 @@ const (
 	scanStartup scanKind = iota // catching up after launch: silent
 	scanConnect                 // onboarding or the c key
 	scanRefresh                 // the r key
-	scanLive                    // fingerprint poll saw a commit
+	scanLive                    // fingerprint poll saw repository state change
 )
 
 type scanDoneMsg struct {
@@ -422,9 +422,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// maybePoll checks connected repos for new commits with stat calls only, and
-// kicks a rescan when something changed. It stays quiet while another scan
-// runs or while a preview mode holds the world still.
+// maybePoll checks connected repos for git and local-run evidence changes
+// without spawning processes, and kicks a rescan when something changed. It
+// stays quiet while another scan runs or while a preview mode holds the world
+// still.
 func (m *Model) maybePoll() tea.Cmd {
 	if m.demo || m.app == nil || m.scanning ||
 		m.mode == preview || m.mode == connectInput || m.mode == confirmExclude ||
