@@ -84,10 +84,10 @@ type Step struct {
 	Summary string
 }
 
-// Presence is the newest usable local run in a repository. Phase remains the
-// last evidenced phase for replay; Active controls whether a live mark may be
-// drawn. Stale evidence can therefore leave a plaque without pretending work
-// is still happening.
+// Presence is the selected usable local run in a repository. Phase remains
+// the last evidenced phase for replay; Active controls whether a live mark may
+// be drawn. Stale evidence can therefore leave a plaque without pretending
+// work is still happening.
 type Presence struct {
 	Phase        Phase
 	Active       bool
@@ -138,8 +138,10 @@ func sameStrings(a, b []string) bool {
 	return true
 }
 
-// Read inspects the two documented local evidence roots and returns the newest
-// valid run. Bad, incomplete, unreadable, or symlinked entries are skipped.
+// Read inspects the two documented local evidence roots and selects a valid
+// run. Malformed records, incomplete final lines, and symlinks are ignored;
+// unreadable, changing, or over-budget evidence encountered during bounded
+// selection makes it fail closed.
 func Read(repo string, now time.Time) Presence {
 	return readWithBudgets(repo, now, maxOpenBytes, maxGNHFBytes)
 }

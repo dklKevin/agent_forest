@@ -82,15 +82,22 @@ the local `.gnhf/runs` layout, using event kinds and curated iteration summaries
 only; it never reads command or model output into the plaque.
 
 Readers do not follow symlinks, leave partial final lines alone, skip malformed
-or unreadable evidence, bound every file and list, and consider a phase mark
-quiet after fifteen minutes without new evidence. Evidence is never copied into
-AgentForest settings or history. Removing the local files removes the plaque on
-the next scan. The two reserved evidence trees do not themselves count as a
-dirty working tree; ordinary uncommitted files still pitch the usual camp.
-Selection causally compares at most 32 evidence-bearing runs per provider. If a
-root exceeds that limit, a byte budget is exhausted, or an evidence file changes
-while its bounded descriptor snapshot is being read, the whole plaque read fails
-closed instead of choosing a convenient but potentially stale run.
+records, and consider a phase mark quiet after fifteen minutes without new
+evidence. Evidence is never copied into AgentForest settings or history.
+Removing the local files removes the plaque on the next scan. The two reserved
+evidence trees do not themselves count as a dirty working tree; ordinary
+uncommitted files still pitch the usual camp.
+
+Each evidence root may contain at most 256 entries and 32 evidence-bearing runs;
+a `.gnhf` compatibility run may contain at most 64 entries. A file is capped at
+1 MiB, a complete record at 64 KiB, and descriptor reads are charged against
+separate 32 MiB `.agentforest` and 16 MiB `.gnhf` repository budgets.
+Provider-neutral runs are ordered by their event timestamps. Compatibility runs
+use file timestamps only within `.gnhf` and never outrank causal
+provider-neutral evidence. If a traversal or byte limit is exceeded, or selected
+evidence is unreadable, unsafe, replaced, or grows while its bounded descriptor
+snapshot is being read, the whole plaque read fails closed instead of choosing
+a convenient but potentially stale run.
 
 ## Running it
 
