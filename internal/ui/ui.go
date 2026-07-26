@@ -530,10 +530,10 @@ func (m Model) scanDone(msg scanDoneMsg) (tea.Model, tea.Cmd) {
 		m.activeScan = 0
 	}
 	m.scanning = false
-	// A persistence failure publishes none of the scan's event, occupancy,
-	// or run state. Do not publish its polling cursor either: keeping the old
-	// fingerprint makes the next poll retry the exact filesystem state that
-	// failed, instead of suppressing it until another unrelated change.
+	// A persistence failure publishes no positive event, occupancy, or run
+	// state. Fail-closed run disappearance may still clear stale public state.
+	// Never publish its polling cursor: keeping the old fingerprint makes the
+	// next poll retry the exact filesystem state that failed.
 	if msg.err == nil {
 		for path, fp := range msg.rep.Fingerprints {
 			m.fps[path] = fp

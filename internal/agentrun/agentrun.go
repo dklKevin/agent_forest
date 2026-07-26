@@ -116,6 +116,12 @@ type runDir struct {
 	at   time.Time
 }
 
+type dirSnapshot struct {
+	info      os.FileInfo
+	entries   []os.DirEntry
+	namespace map[string]os.FileInfo
+}
+
 // FingerprintScope identifies the evidence tier whose metadata can affect a
 // result returned by ReadWithScope.
 type FingerprintScope uint8
@@ -126,17 +132,25 @@ const (
 )
 
 // Fingerprints holds metadata-only polling digests for both possible evidence
-// scopes from one filesystem walk.
+// scopes from one bounded metadata pass.
 type Fingerprints struct {
-	authoritative string
-	compatibility string
+	authoritative       string
+	compatibility       string
+	authoritativeStable bool
+	compatibilityStable bool
 }
 
 // For returns the polling digest for scope, prefixed so the next poll can
 // preserve the selected authority tier.
 func (f Fingerprints) For(scope FingerprintScope) string {
 	if scope == FingerprintAuthoritative {
+		if !f.authoritativeStable {
+			return ""
+		}
 		return "a:" + f.authoritative
+	}
+	if !f.compatibilityStable {
+		return ""
 	}
 	return "c:" + f.compatibility
 }
@@ -218,23 +232,29 @@ func readWithScope(repo string, now time.Time, openLimit, gnhfLimit int64) (Pres
 
 func scanTier(repo, provider string, now time.Time, budget *readBudget) tierResult {
 	type candidate struct {
-		dir string
-		at  time.Time
+		dir  string
+		info os.FileInfo
+		at   time.Time
 	}
 	root, present, uncertain := evidenceRoot(repo, provider)
 	if uncertain || !present {
 		return tierResult{uncertain: uncertain}
 	}
 
-	entries, err := recentRunDirs(root)
+	before, err := safeReadDirSnapshot(root, maxDirEntries)
+	if err != nil {
+		return tierResult{uncertain: true}
+	}
+	entries, err := recentRunDirsFromSnapshot(root, before)
 	if err != nil {
 		return tierResult{uncertain: true}
 	}
 	candidates := make([]candidate, 0, len(entries))
 	for _, entry := range entries {
 		candidates = append(candidates, candidate{
-			dir: filepath.Join(root, entry.name),
-			at:  entry.at,
+			dir:  filepath.Join(root, entry.name),
+			info: entry.info,
+			at:   entry.at,
 		})
 	}
 	sort.Slice(candidates, func(i, j int) bool {
@@ -246,26 +266,30 @@ func scanTier(repo, provider string, now time.Time, budget *readBudget) tierResu
 	var found []presenceResult
 	for _, item := range candidates {
 		info, err := os.Lstat(item.dir)
-		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 ||
+			!sameFileState(item.info, info) {
 			return tierResult{uncertain: true}
 		}
-		var p Presence
-		var ok bool
+		var observations []Presence
 		switch provider {
 		case ".agentforest":
-			p, ok = readOpenRun(item.dir, now, budget)
+			observations = readOpenRunObservations(item.dir, now, budget)
 		case ".gnhf":
-			p, ok = readGNHFRun(item.dir, now, budget)
+			observations = readGNHFRunObservations(item.dir, now, budget)
 		}
 		if budget.uncertain {
 			return tierResult{uncertain: true}
 		}
-		if ok {
+		for _, p := range observations {
 			found = append(found, presenceResult{p: p, causal: provider == ".agentforest"})
 		}
 	}
-	after, err := recentRunDirs(root)
-	if err != nil || !sameRunDirs(entries, after) {
+	after, err := safeReadDirSnapshot(root, maxDirEntries)
+	if err != nil || !sameDirSnapshots(before, after) {
+		return tierResult{uncertain: true}
+	}
+	afterRuns, err := recentRunDirsFromSnapshot(root, after)
+	if err != nil || !sameRunDirs(entries, afterRuns) {
 		return tierResult{uncertain: true}
 	}
 	return tierResult{found: found}
@@ -343,15 +367,26 @@ type openEvent struct {
 }
 
 func readOpenRun(dir string, now time.Time, budget *readBudget) (Presence, bool) {
+	observations := readOpenRunObservations(dir, now, budget)
+	found := make([]presenceResult, 0, len(observations))
+	for _, p := range observations {
+		found = append(found, presenceResult{p: p, causal: true})
+	}
+	p := selectPresence(found)
+	return p, p.Available()
+}
+
+func readOpenRunObservations(dir string, now time.Time, budget *readBudget) []Presence {
 	data, err := safeReadFile(filepath.Join(dir, "events.jsonl"), budget)
 	if err != nil {
-		return Presence{}, false
+		return nil
 	}
 
-	var events []struct {
+	type timedOpenEvent struct {
 		event openEvent
 		at    time.Time
 	}
+	var events []timedOpenEvent
 	forEachCompleteLine(data, func(line []byte) {
 		var ev openEvent
 		if err := json.Unmarshal(line, &ev); err != nil {
@@ -361,49 +396,70 @@ func readOpenRun(dir string, now time.Time, budget *readBudget) (Presence, bool)
 		if err != nil || !validPhase(ev.Phase) || at.After(now.Add(futureLeeway)) {
 			return
 		}
-		events = append(events, struct {
-			event openEvent
-			at    time.Time
-		}{event: ev, at: at})
+		events = append(events, timedOpenEvent{event: ev, at: at})
 	})
 	sort.SliceStable(events, func(i, j int) bool {
 		return events[i].at.Before(events[j].at)
 	})
+	if len(events) == 0 {
+		return nil
+	}
 
-	var p Presence
+	maximum := events[len(events)-1].at
+	var base Presence
 	for _, item := range events {
-		ev, at := item.event, item.at
-		p.Phase = ev.Phase
-		p.UpdatedAt = at
-		if v := cleanText(ev.Objective); v != "" {
-			p.Objective = v
+		if !item.at.Before(maximum) {
+			break
 		}
-		if v := cleanText(ev.Summary); v != "" {
-			appendStep(&p, Step{At: at, Phase: ev.Phase, Summary: v})
+		applyOpenEvent(&base, item.event, item.at)
+	}
+	observations := make([]Presence, 0, len(events))
+	for _, item := range events {
+		if !item.at.Equal(maximum) {
+			continue
 		}
-		for _, path := range ev.Paths {
-			if v, ok := cleanRelativePath(path); ok {
-				appendUnique(&p.Paths, v)
-			}
-		}
-		switch ev.Verification {
-		case "passed", "failed":
-			p.Verification = ev.Verification
-		}
-		if v := cleanText(ev.Failure); v != "" {
-			appendUnique(&p.Failures, v)
-		}
-		for _, item := range ev.Unresolved {
-			if v := cleanText(item); v != "" {
-				appendUnique(&p.Unresolved, v)
-			}
+		p := clonePresence(base)
+		applyOpenEvent(&p, item.event, item.at)
+		p.Active = now.Sub(p.UpdatedAt) <= freshFor && now.Sub(p.UpdatedAt) >= -futureLeeway
+		observations = append(observations, p)
+	}
+	return observations
+}
+
+func applyOpenEvent(p *Presence, ev openEvent, at time.Time) {
+	p.Phase = ev.Phase
+	p.UpdatedAt = at
+	if v := cleanText(ev.Objective); v != "" {
+		p.Objective = v
+	}
+	if v := cleanText(ev.Summary); v != "" {
+		appendStep(p, Step{At: at, Phase: ev.Phase, Summary: v})
+	}
+	for _, path := range ev.Paths {
+		if v, ok := cleanRelativePath(path); ok {
+			appendUnique(&p.Paths, v)
 		}
 	}
-	if !p.Available() {
-		return Presence{}, false
+	switch ev.Verification {
+	case "passed", "failed":
+		p.Verification = ev.Verification
 	}
-	p.Active = now.Sub(p.UpdatedAt) <= freshFor && now.Sub(p.UpdatedAt) >= -futureLeeway
-	return p, true
+	if v := cleanText(ev.Failure); v != "" {
+		appendUnique(&p.Failures, v)
+	}
+	for _, item := range ev.Unresolved {
+		if v := cleanText(item); v != "" {
+			appendUnique(&p.Unresolved, v)
+		}
+	}
+}
+
+func clonePresence(p Presence) Presence {
+	p.Steps = append([]Step(nil), p.Steps...)
+	p.Paths = append([]string(nil), p.Paths...)
+	p.Failures = append([]string(nil), p.Failures...)
+	p.Unresolved = append([]string(nil), p.Unresolved...)
+	return p
 }
 
 type gnhfEvent struct {
@@ -413,11 +469,11 @@ type gnhfEvent struct {
 	} `json:"item"`
 }
 
-func readGNHFRun(dir string, now time.Time, budget *readBudget) (Presence, bool) {
+func readGNHFRunObservations(dir string, now time.Time, budget *readBudget) []Presence {
 	entries, err := safeReadDir(dir, maxRunEntries)
 	if err != nil {
 		budget.uncertain = true
-		return Presence{}, false
+		return nil
 	}
 	var logs []string
 	for _, entry := range entries {
@@ -429,49 +485,77 @@ func readGNHFRun(dir string, now time.Time, budget *readBudget) (Presence, bool)
 		logs = append(logs, filepath.Join(dir, name))
 	}
 	if len(logs) == 0 {
-		return Presence{}, false
+		return nil
 	}
 	sort.Slice(logs, func(i, j int) bool {
 		return iterationNumber(logs[i]) < iterationNumber(logs[j])
 	})
-	if len(logs) > maxSteps {
-		logs = logs[len(logs)-maxSteps:]
-	}
 
 	// prompt.md and event item payloads are intentionally not read into
 	// the plaque. Only the writer's curated iteration summaries cross the
 	// compatibility boundary.
-	p := Presence{}
 	summaries := map[int]string{}
 	notes := filepath.Join(dir, "notes.md")
 	if _, ok := regularEvidenceInfo(notes); ok {
 		summaries = noteSummaries(notes, budget)
 	}
+	type observation struct {
+		phase     Phase
+		at        time.Time
+		iteration int
+		summary   string
+	}
+	var parsed []observation
 	for _, path := range logs {
 		phase, at, ok := readGNHFLog(path, now, budget)
 		if !ok {
 			continue
 		}
-		p.Phase, p.UpdatedAt = phase, at
 		n := iterationNumber(path)
-		if summary := summaries[n]; summary != "" {
-			appendStep(&p, Step{At: at, Phase: phase, Summary: summary})
+		parsed = append(parsed, observation{
+			phase: phase, at: at, iteration: n, summary: summaries[n],
+		})
+	}
+	if len(parsed) == 0 {
+		return nil
+	}
+	sort.SliceStable(parsed, func(i, j int) bool {
+		if parsed[i].at.Equal(parsed[j].at) {
+			return parsed[i].iteration < parsed[j].iteration
 		}
+		return parsed[i].at.Before(parsed[j].at)
+	})
+	maximum := parsed[len(parsed)-1].at
+	var base Presence
+	for _, item := range parsed {
+		if !item.at.Before(maximum) {
+			break
+		}
+		applyGNHFObservation(&base, item.phase, item.at, item.summary)
 	}
-	if !p.Available() {
-		return Presence{}, false
+	observations := make([]Presence, 0, len(parsed))
+	for _, item := range parsed {
+		if !item.at.Equal(maximum) {
+			continue
+		}
+		p := clonePresence(base)
+		applyGNHFObservation(&p, item.phase, item.at, item.summary)
+		p.Active = now.Sub(p.UpdatedAt) <= freshFor && now.Sub(p.UpdatedAt) >= -futureLeeway
+		observations = append(observations, p)
 	}
-	p.Active = now.Sub(p.UpdatedAt) <= freshFor && now.Sub(p.UpdatedAt) >= -futureLeeway
-	return p, true
+	return observations
 }
 
-func recentRunDirs(root string) ([]runDir, error) {
-	entries, err := safeReadDir(root, maxDirEntries)
-	if err != nil {
-		return nil, err
+func applyGNHFObservation(p *Presence, phase Phase, at time.Time, summary string) {
+	p.Phase, p.UpdatedAt = phase, at
+	if summary != "" {
+		appendStep(p, Step{At: at, Phase: phase, Summary: summary})
 	}
-	candidates := make([]runDir, 0, len(entries))
-	for _, entry := range entries {
+}
+
+func recentRunDirsFromSnapshot(root string, snapshot dirSnapshot) ([]runDir, error) {
+	candidates := make([]runDir, 0, len(snapshot.entries))
+	for _, entry := range snapshot.entries {
 		if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
 			continue
 		}
@@ -482,6 +566,10 @@ func recentRunDirs(root string) ([]runDir, error) {
 		}
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return nil, errors.New("local evidence run changed during traversal")
+		}
+		enumerated, ok := snapshot.namespace[entry.Name()]
+		if !ok || !sameFileState(enumerated, info) {
+			return nil, errors.New("local evidence run changed after enumeration")
 		}
 		at, err := runEvidenceModTime(root, dir)
 		if err != nil {
@@ -514,7 +602,16 @@ func sameRunDirs(a, b []runDir) bool {
 	}
 	for _, run := range b {
 		info, ok := byName[run.name]
-		if !ok || !os.SameFile(info, run.info) {
+		if !ok || !sameFileState(info, run.info) {
+			return false
+		}
+	}
+	byTime := make(map[string]time.Time, len(a))
+	for _, run := range a {
+		byTime[run.name] = run.at
+	}
+	for _, run := range b {
+		if !byTime[run.name].Equal(run.at) {
 			return false
 		}
 	}
@@ -710,60 +807,72 @@ func safeReadDir(path string, limit int) ([]os.DirEntry, error) {
 }
 
 func safeReadDirAfter(path string, limit int, afterRead func()) ([]os.DirEntry, error) {
+	snapshot, err := safeReadDirSnapshotAfter(path, limit, afterRead)
+	if err != nil {
+		return nil, err
+	}
+	return snapshot.entries, nil
+}
+
+func safeReadDirSnapshot(path string, limit int) (dirSnapshot, error) {
+	return safeReadDirSnapshotAfter(path, limit, nil)
+}
+
+func safeReadDirSnapshotAfter(path string, limit int, afterRead func()) (dirSnapshot, error) {
 	if limit <= 0 {
-		return nil, errors.New("local evidence directory limit must be positive")
+		return dirSnapshot{}, errors.New("local evidence directory limit must be positive")
 	}
 	info, err := os.Lstat(path)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return nil, errors.New("unsafe local evidence directory")
+		return dirSnapshot{}, errors.New("unsafe local evidence directory")
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return dirSnapshot{}, err
 	}
 	defer f.Close()
 	opened, err := f.Stat()
-	if err != nil || !os.SameFile(info, opened) || !opened.IsDir() {
-		return nil, errors.New("local evidence directory changed while opening")
+	if err != nil || !sameFileState(info, opened) || !opened.IsDir() {
+		return dirSnapshot{}, errors.New("local evidence directory changed while opening")
 	}
 	entries, err := f.ReadDir(limit + 1)
 	if err != nil && !errors.Is(err, io.EOF) {
-		return nil, err
+		return dirSnapshot{}, err
 	}
 	if len(entries) > limit {
-		return nil, errors.New("local evidence directory exceeds traversal limit")
+		return dirSnapshot{}, errors.New("local evidence directory exceeds traversal limit")
 	}
 	first, err := dirEntryInfos(entries)
 	if err != nil {
-		return nil, err
+		return dirSnapshot{}, err
 	}
 	if afterRead != nil {
 		afterRead()
 	}
 	current, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return dirSnapshot{}, err
 	}
 	defer current.Close()
 	currentInfo, err := current.Stat()
-	if err != nil || !os.SameFile(opened, currentInfo) || !currentInfo.IsDir() {
-		return nil, errors.New("local evidence directory changed during traversal")
+	if err != nil || !sameFileState(opened, currentInfo) || !currentInfo.IsDir() {
+		return dirSnapshot{}, errors.New("local evidence directory changed during traversal")
 	}
 	currentEntries, err := current.ReadDir(limit + 1)
 	if err != nil && !errors.Is(err, io.EOF) {
-		return nil, err
+		return dirSnapshot{}, err
 	}
 	if len(currentEntries) > limit {
-		return nil, errors.New("local evidence directory exceeds traversal limit")
+		return dirSnapshot{}, errors.New("local evidence directory exceeds traversal limit")
 	}
 	second, err := dirEntryInfos(currentEntries)
 	if err != nil || !sameDirEntryInfos(first, second) {
-		return nil, errors.New("local evidence directory namespace changed during traversal")
+		return dirSnapshot{}, errors.New("local evidence directory namespace changed during traversal")
 	}
 	sort.Slice(currentEntries, func(i, j int) bool {
 		return currentEntries[i].Name() < currentEntries[j].Name()
 	})
-	return currentEntries, nil
+	return dirSnapshot{info: currentInfo, entries: currentEntries, namespace: second}, nil
 }
 
 func dirEntryInfos(entries []os.DirEntry) (map[string]os.FileInfo, error) {
@@ -784,11 +893,20 @@ func sameDirEntryInfos(a, b map[string]os.FileInfo) bool {
 	}
 	for name, first := range a {
 		second, ok := b[name]
-		if !ok || !os.SameFile(first, second) {
+		if !ok || !sameFileState(first, second) {
 			return false
 		}
 	}
 	return true
+}
+
+func sameDirSnapshots(a, b dirSnapshot) bool {
+	return sameFileState(a.info, b.info) && sameDirEntryInfos(a.namespace, b.namespace)
+}
+
+func sameFileState(a, b os.FileInfo) bool {
+	return a != nil && b != nil && os.SameFile(a, b) &&
+		a.Size() == b.Size() && a.Mode() == b.Mode() && a.ModTime().Equal(b.ModTime())
 }
 
 // forEachCompleteLine consumes newline-terminated records only. Append-only
@@ -908,10 +1026,12 @@ func Fingerprint(repo string) Fingerprints {
 	}
 	var compatibility bytes.Buffer
 	_, _ = compatibility.Write(authoritative.Bytes())
-	fingerprintTier(&compatibility, repo, ".gnhf")
+	compatibilityStable := fingerprintTier(&compatibility, repo, ".gnhf")
 	return Fingerprints{
-		authoritative: authDigest,
-		compatibility: fingerprintDigest(compatibility.Bytes()),
+		authoritative:       authDigest,
+		compatibility:       fingerprintDigest(compatibility.Bytes()),
+		authoritativeStable: true,
+		compatibilityStable: compatibilityStable,
 	}
 }
 
@@ -921,7 +1041,10 @@ func FingerprintFor(repo string, scope FingerprintScope) string {
 	var data bytes.Buffer
 	stable := fingerprintTier(&data, repo, ".agentforest")
 	if stable && scope == FingerprintCompatibility {
-		fingerprintTier(&data, repo, ".gnhf")
+		stable = fingerprintTier(&data, repo, ".gnhf")
+	}
+	if !stable {
+		return ""
 	}
 	digest := fingerprintDigest(data.Bytes())
 	if scope == FingerprintAuthoritative {
@@ -946,7 +1069,25 @@ func fingerprintTier(h io.Writer, repo, name string) bool {
 		_, _ = io.WriteString(h, "absent\x00")
 		return true
 	}
-	runs, err := recentRunDirs(root)
+	before, err := safeReadDirSnapshot(root, maxDirEntries)
+	if err != nil {
+		_, _ = io.WriteString(h, "unstable-root\x00")
+		return false
+	}
+	rootInfo, rootID, ok := stableMetadataIdentity(root)
+	if !ok || !sameFileState(before.info, rootInfo) {
+		_, _ = io.WriteString(h, "unknown-root-identity\x00")
+		return false
+	}
+	_, _ = fmt.Fprintf(h, "root\x00%s\x00%d\x00%d\x00%d\x00",
+		rootID, rootInfo.Size(), rootInfo.ModTime().UnixNano(), rootInfo.Mode())
+	for _, entry := range before.entries {
+		info := before.namespace[entry.Name()]
+		_, _ = fmt.Fprintf(h, "entry\x00%s\x00%d\x00%d\x00%d\x00",
+			entry.Name(), info.Size(), info.ModTime().UnixNano(), info.Mode())
+	}
+
+	runs, err := recentRunDirsFromSnapshot(root, before)
 	if err != nil {
 		_, _ = io.WriteString(h, "unstable\x00")
 		return false
@@ -954,15 +1095,46 @@ func fingerprintTier(h io.Writer, repo, name string) bool {
 	for _, run := range runs {
 		dir := filepath.Join(root, run.name)
 		for _, path := range fingerprintFiles(root, dir) {
-			info, ok := regularEvidenceInfo(path)
-			if !ok {
+			info, identity, ok := stableMetadataIdentity(path)
+			if !ok || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 				_, _ = io.WriteString(h, "unsafe-file\x00")
 				return false
 			}
 			rel, _ := filepath.Rel(repo, path)
-			_, _ = fmt.Fprintf(h, "%s\x00%d\x00%d\x00%d\x00",
-				rel, info.Size(), info.ModTime().UnixNano(), info.Mode())
+			_, _ = fmt.Fprintf(h, "%s\x00%s\x00%d\x00%d\x00%d\x00",
+				rel, identity, info.Size(), info.ModTime().UnixNano(), info.Mode())
 		}
 	}
+	after, err := safeReadDirSnapshot(root, maxDirEntries)
+	if err != nil || !sameDirSnapshots(before, after) {
+		_, _ = io.WriteString(h, "changed-root\x00")
+		return false
+	}
 	return true
+}
+
+func stableMetadataIdentity(path string) (os.FileInfo, string, bool) {
+	before, err := os.Lstat(path)
+	if err != nil || before.Mode()&os.ModeSymlink != 0 ||
+		(!before.IsDir() && !before.Mode().IsRegular()) {
+		return nil, "", false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, "", false
+	}
+	defer f.Close()
+	opened, err := f.Stat()
+	if err != nil || !sameFileState(before, opened) {
+		return nil, "", false
+	}
+	identity, ok := platformFileIdentity(f, opened)
+	if !ok || identity == "" {
+		return nil, "", false
+	}
+	after, err := os.Lstat(path)
+	if err != nil || !sameFileState(opened, after) {
+		return nil, "", false
+	}
+	return opened, identity, true
 }

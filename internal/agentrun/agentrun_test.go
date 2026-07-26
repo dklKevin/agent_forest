@@ -129,8 +129,9 @@ func TestGNHFCompatibilityReadsKindsAndSummariesOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	for _, name := range []string{"iteration-1.jsonl", "iteration-2.jsonl"} {
-		if err := os.Chtimes(filepath.Join(dst, name), now, now); err != nil {
+	for i, name := range []string{"iteration-1.jsonl", "iteration-2.jsonl"} {
+		at := now.Add(time.Duration(i-1) * time.Second)
+		if err := os.Chtimes(filepath.Join(dst, name), at, at); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -462,6 +463,141 @@ func TestEqualCausalTimeRequiresFullPresenceConsensus(t *testing.T) {
 	}
 }
 
+func TestEqualCausalTimeConflictWithinOneAuthoritativeRunFailsClosed(t *testing.T) {
+	now := time.Now().UTC()
+	older := now.Add(-2 * time.Minute)
+	latest := now.Add(-time.Minute)
+	conflicts := []string{
+		event(latest, Building, `"objective":"BUILDING_TRUTH","summary":"built"`),
+		event(latest, Testing, `"objective":"TESTING_TRUTH","summary":"tested"`),
+	}
+	for _, ordered := range [][]string{
+		{conflicts[0], conflicts[1]},
+		{conflicts[1], conflicts[0]},
+	} {
+		repo := t.TempDir()
+		put(t, openLog(repo, "contradictory"), event(older, Planning, `"objective":"older"`)+
+			strings.Join(ordered, ""))
+		if p := Read(repo, now); p.Available() {
+			t.Fatalf("same-run maximum-time contradiction survived: %+v", p)
+		}
+	}
+}
+
+func TestEqualCausalTimeDuplicateWithinOneAuthoritativeRunIsAccepted(t *testing.T) {
+	repo := t.TempDir()
+	now := time.Now().UTC()
+	at := now.Add(-time.Minute)
+	line := event(at, Testing, `"objective":"same","summary":"same"`)
+	put(t, openLog(repo, "duplicates"), line+line)
+
+	p := Read(repo, now)
+	if p.Phase != Testing || p.Objective != "same" || len(p.Steps) != 1 ||
+		p.Steps[0].Summary != "same" {
+		t.Fatalf("identical same-run duplicates did not collapse to one truth: %+v", p)
+	}
+}
+
+func TestCausallyNewerTruthWinsAfterOlderSameRunConflict(t *testing.T) {
+	repo := t.TempDir()
+	now := time.Now().UTC()
+	older := now.Add(-2 * time.Minute)
+	newer := now.Add(-time.Minute)
+	put(t, openLog(repo, "newer"), strings.Join([]string{
+		event(older, Building, `"objective":"older-building"`),
+		event(older, Testing, `"objective":"older-testing"`),
+		event(newer, Reviewing, `"objective":"newer-truth"`),
+	}, ""))
+
+	p := Read(repo, now)
+	if p.Phase != Reviewing || p.Objective != "newer-truth" || !p.UpdatedAt.Equal(newer) {
+		t.Fatalf("older contradiction vetoed causally newer truth: %+v", p)
+	}
+}
+
+func TestEqualMtimeConflictWithinOneCompatibilityRunFailsClosed(t *testing.T) {
+	now := time.Now().UTC()
+	for _, ordered := range [][]string{
+		{`{"type":"item.started"}` + "\n", `{"type":"thread.started"}` + "\n"},
+		{`{"type":"thread.started"}` + "\n", `{"type":"item.started"}` + "\n"},
+	} {
+		repo := t.TempDir()
+		run := filepath.Join(repo, ".gnhf", "runs", "contradictory")
+		first := filepath.Join(run, "iteration-1.jsonl")
+		second := filepath.Join(run, "iteration-2.jsonl")
+		put(t, first, ordered[0])
+		put(t, second, ordered[1])
+		for _, path := range []string{first, second} {
+			if err := os.Chtimes(path, now, now); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if p := Read(repo, now); p.Available() {
+			t.Fatalf("same-run compatibility maximum-mtime contradiction survived: %+v", p)
+		}
+	}
+}
+
+func TestCompatibilityConsensusIncludesLogsBeyondReplayStepLimit(t *testing.T) {
+	repo := t.TempDir()
+	now := time.Now().UTC()
+	run := filepath.Join(repo, ".gnhf", "runs", "complete-consensus")
+	for i := 1; i <= maxSteps+1; i++ {
+		path := filepath.Join(run, fmt.Sprintf("iteration-%d.jsonl", i))
+		content := `{"type":"thread.started"}` + "\n"
+		at := now.Add(-time.Minute)
+		if i == 1 {
+			content = `{"type":"item.started"}` + "\n"
+			at = now
+		}
+		if i == 2 {
+			at = now
+		}
+		put(t, path, content)
+		if err := os.Chtimes(path, at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if p := Read(repo, now); p.Available() {
+		t.Fatalf("maximum-mtime contradiction outside replay step window survived: %+v", p)
+	}
+}
+
+func TestCompatibilityDuplicateAndNewerTruthAreOrderIndependent(t *testing.T) {
+	now := time.Now().UTC()
+	t.Run("identical duplicates", func(t *testing.T) {
+		repo := t.TempDir()
+		run := filepath.Join(repo, ".gnhf", "runs", "duplicates")
+		for _, name := range []string{"iteration-1.jsonl", "iteration-2.jsonl"} {
+			path := filepath.Join(run, name)
+			put(t, path, `{"type":"item.started"}`+"\n")
+			if err := os.Chtimes(path, now, now); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if p := Read(repo, now); p.Phase != Building || !p.Active {
+			t.Fatalf("identical compatibility duplicates were rejected: %+v", p)
+		}
+	})
+	t.Run("newer mtime wins despite iteration order", func(t *testing.T) {
+		repo := t.TempDir()
+		run := filepath.Join(repo, ".gnhf", "runs", "newer")
+		newer := filepath.Join(run, "iteration-1.jsonl")
+		older := filepath.Join(run, "iteration-2.jsonl")
+		put(t, newer, `{"type":"item.started"}`+"\n")
+		put(t, older, `{"type":"thread.started"}`+"\n")
+		if err := os.Chtimes(newer, now, now); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(older, now.Add(-time.Minute), now.Add(-time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		if p := Read(repo, now); p.Phase != Building || !p.UpdatedAt.Equal(now) {
+			t.Fatalf("iteration order overrode newer compatibility truth: %+v", p)
+		}
+	})
+}
+
 func TestCausalNewestRunWinsAcrossProviders(t *testing.T) {
 	repo := t.TempDir()
 	now := time.Now().UTC()
@@ -617,6 +753,72 @@ func TestAuthoritativeRunAdditionDuringScanFailsClosed(t *testing.T) {
 	result := scanTier(repo, ".agentforest", now, budget)
 	if !result.uncertain || len(result.found) != 0 {
 		t.Fatalf("concurrent run addition was not tier uncertainty: %+v", result)
+	}
+}
+
+func TestAuthoritativeRootNamespaceMutationAcrossTierScanFailsClosed(t *testing.T) {
+	tests := []struct {
+		name    string
+		prepare func(*testing.T, string)
+		mutate  func(*testing.T, string)
+	}{
+		{
+			name: "filtered entry addition",
+			mutate: func(t *testing.T, root string) {
+				put(t, filepath.Join(root, "filtered.txt"), "not a run")
+			},
+		},
+		{
+			name: "filtered entry removal",
+			prepare: func(t *testing.T, root string) {
+				put(t, filepath.Join(root, "filtered.txt"), "not a run")
+			},
+			mutate: func(t *testing.T, root string) {
+				if err := os.Remove(filepath.Join(root, "filtered.txt")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "root replacement with unchanged child moved into it",
+			mutate: func(t *testing.T, root string) {
+				oldRoot := root + ".old"
+				if err := os.Rename(root, oldRoot); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(root, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(filepath.Join(oldRoot, "initial"),
+					filepath.Join(root, "initial")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := t.TempDir()
+			now := time.Now().UTC()
+			initial := openLog(repo, "initial")
+			put(t, initial, event(now.Add(-time.Minute), Planning, `"objective":"must not publish"`))
+			root := filepath.Join(repo, ".agentforest", "runs")
+			if tt.prepare != nil {
+				tt.prepare(t, root)
+			}
+			budget := &readBudget{remaining: maxOpenBytes}
+			var once sync.Once
+			budget.beforeRead = func(path string) {
+				if path == initial {
+					once.Do(func() { tt.mutate(t, root) })
+				}
+			}
+
+			result := scanTier(repo, ".agentforest", now, budget)
+			if !result.uncertain || len(result.found) != 0 {
+				t.Fatalf("inter-pass root namespace mutation was accepted: %+v", result)
+			}
+		})
 	}
 }
 
@@ -878,8 +1080,52 @@ func TestFingerprintChangesWhenAuthoritativeEvidenceBecomesUnsafe(t *testing.T) 
 	if err := os.Mkdir(path, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if second := FingerprintFor(repo, FingerprintAuthoritative); second == first {
-		t.Fatal("unsafe authoritative state did not change fingerprint")
+	if second := FingerprintFor(repo, FingerprintAuthoritative); second != "" {
+		t.Fatalf("unsafe authoritative state published a polling cursor: %q (was %q)", second, first)
+	}
+}
+
+func TestFingerprintIncludesAuthoritativeRootIdentity(t *testing.T) {
+	repo := t.TempDir()
+	now := time.Now().UTC()
+	path := openLog(repo, "authoritative")
+	put(t, path, event(now.Add(-time.Minute), Testing, ""))
+	root := filepath.Join(repo, ".agentforest", "runs")
+	before, err := os.Lstat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := FingerprintFor(repo, FingerprintAuthoritative)
+	if first == "" {
+		t.Fatal("test setup produced no authoritative fingerprint")
+	}
+
+	oldRoot := root + ".old"
+	if err := os.Rename(root, oldRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(root, before.Mode()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(oldRoot, "authoritative"),
+		filepath.Join(root, "authoritative")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(root, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Lstat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(before, after) || before.Size() != after.Size() ||
+		!before.ModTime().Equal(after.ModTime()) || before.Mode() != after.Mode() {
+		t.Fatalf("test setup was not an identity-only root replacement: before=%+v after=%+v",
+			before, after)
+	}
+	if second := FingerprintFor(repo, FingerprintAuthoritative); second == "" || second == first {
+		t.Fatalf("authoritative root replacement did not change fingerprint: before=%q after=%q",
+			first, second)
 	}
 }
 

@@ -28,8 +28,9 @@ type App struct {
 	HasSettings bool // settings.json existed; false means first run
 	Skipped     int  // unreadable event-log lines skipped while loading
 
-	// Events, occupancy, and local run evidence cross together from the scan
-	// goroutine to the UI.
+	// Successful events, occupancy, and local run evidence cross together from
+	// the scan goroutine to the UI. Fail-closed run unavailability may publish
+	// independently so a git or persistence failure cannot retain a stale mark.
 	// stateMu guards every access and lets Towns copy one consistent view.
 	// Event entries are immutable after publication, so copying the slice is
 	// sufficient; occupancy is copied because its map is updated in place.
@@ -331,10 +332,14 @@ func (a *App) scan(repos []string, now time.Time, pruneMissing bool) (ScanReport
 			runFP := agentrun.Fingerprint(repo)
 			evs, err := gitscan.Scan(repo, known[repo], now)
 			run, scope := agentrun.ReadWithScope(repo, now)
+			runCursor := runFP.For(scope)
+			if runCursor == "" {
+				run = agentrun.Presence{}
+			}
 			results[i] = result{
 				repo: repo, evs: evs, err: err,
 				occ: gitscan.ReadOccupancy(repo), run: run,
-				fp: pollFingerprint(gitFP, runFP.For(scope)),
+				fp: pollFingerprint(gitFP, runCursor),
 			}
 		}(i, repo)
 	}
@@ -354,6 +359,22 @@ func (a *App) scan(repos []string, now time.Time, pruneMissing bool) (ScanReport
 			fresh = append(fresh, r.evs...)
 		}
 	}
+
+	// Unavailability is safer than stale presence and does not depend on a git
+	// event commit. Publish only the negative state here: valid new run evidence
+	// and occupancy still cross atomically with successful event publication
+	// below. An errored repository publishes no cursor, so the next poll retries.
+	a.stateMu.Lock()
+	for _, r := range results {
+		if r.run.Available() {
+			continue
+		}
+		if previous, ok := a.runs[r.repo]; ok && previous.Available() {
+			delete(a.runs, r.repo)
+			rep.PresenceShift = true
+		}
+	}
+	a.stateMu.Unlock()
 
 	if len(fresh) > 0 {
 		if err := store.AppendEvents(a.Dir, fresh); err != nil {
@@ -426,7 +447,7 @@ func PollFingerprint(repo string, previous ...string) string {
 }
 
 func pollFingerprint(gitFP, runFP string) string {
-	if gitFP == "" {
+	if gitFP == "" || runFP == "" {
 		return ""
 	}
 	return gitFP + ":" + runFP

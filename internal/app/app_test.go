@@ -553,6 +553,130 @@ func TestRepoScanErrorPreservesCursorAndVolatileState(t *testing.T) {
 	}
 }
 
+func TestFailedGitScanClearsRemovedPriorActivePresenceWithoutAdvancingCursor(t *testing.T) {
+	t.Setenv("AGENTFOREST_HOME", t.TempDir())
+	root := t.TempDir()
+	repo := filepath.Join(root, "keep")
+	now := time.Now().UTC()
+	mkRepo(t, repo, now.Add(-time.Hour), "main.go", "package main")
+	evidence := writeRunEvidence(t, repo, now.Add(-time.Minute), "building", "must clear")
+
+	a, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := a.ConnectRoot(root, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !a.Towns()[0].Run.ActiveAt(now) {
+		t.Fatalf("test setup did not publish active presence: %+v", a.Towns()[0].Run)
+	}
+	key := a.Towns()[0].Path
+	if initial.Fingerprints[key] == "" {
+		t.Fatal("test setup did not publish an initial polling cursor")
+	}
+
+	if err := os.Remove(evidence); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, repo, nil, "checkout", "-q", "-b", "wip")
+	ref := filepath.Join(repo, ".git", "refs", "heads", "wip")
+	if err := os.WriteFile(ref, []byte(strings.Repeat("0", 40)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := a.RescanRepo(key, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Errors) != 1 {
+		t.Fatalf("scan errors = %v", rep.Errors)
+	}
+	if _, ok := rep.Fingerprints[key]; ok {
+		t.Fatal("failed git scan advanced the polling cursor")
+	}
+	if !rep.PresenceShift || a.Towns()[0].Run.Available() {
+		t.Fatalf("failed git scan retained removed active presence: report=%+v run=%+v",
+			rep, a.Towns()[0].Run)
+	}
+}
+
+func TestPollFingerprintChangesAfterSettledAtomicEvidenceReplacementBeforeRead(t *testing.T) {
+	t.Setenv("AGENTFOREST_HOME", t.TempDir())
+	root := t.TempDir()
+	repo := filepath.Join(root, "keep")
+	now := time.Now().UTC()
+	mkRepo(t, repo, now.Add(-time.Hour), "main.go", "package main")
+	path := writeRunEvidence(t, repo, now.Add(-time.Minute), "planning", "OLD_SECRET")
+
+	a, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, err := a.ConnectRoot(root, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := a.Towns()[0].Path
+	cursor := rep.Fingerprints[key]
+	if cursor == "" || a.Towns()[0].Run.Phase.String() != "planning" {
+		t.Fatalf("test setup did not publish planning cursor: cursor=%q run=%+v",
+			cursor, a.Towns()[0].Run)
+	}
+	before, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runBefore, err := os.Lstat(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := filepath.Join(filepath.Dir(path), "events.next")
+	line := fmt.Sprintf("{\"at\":%q,\"phase\":%q,\"summary\":%q}\n",
+		now.Add(-time.Minute).Format(time.RFC3339Nano), "building", "NEW_SECRET")
+	if int64(len(line)) != before.Size() {
+		t.Fatalf("replacement size = %d, want %d", len(line), before.Size())
+	}
+	if err := os.WriteFile(replacement, []byte(line), before.Mode()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(replacement, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filepath.Dir(path), runBefore.ModTime(), runBefore.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runAfter, err := os.Lstat(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(before, after) || before.Size() != after.Size() ||
+		!before.ModTime().Equal(after.ModTime()) || before.Mode() != after.Mode() {
+		t.Fatalf("test setup was not an identity-only settled replacement: before=%+v after=%+v",
+			before, after)
+	}
+	if !os.SameFile(runBefore, runAfter) || runBefore.Size() != runAfter.Size() ||
+		!runBefore.ModTime().Equal(runAfter.ModTime()) || runBefore.Mode() != runAfter.Mode() {
+		t.Fatalf("run directory metadata changed across replacement: before=%+v after=%+v",
+			runBefore, runAfter)
+	}
+
+	if got := PollFingerprint(key, cursor); got == cursor {
+		t.Fatalf("settled identity-only replacement aliased production polling cursor %q", cursor)
+	}
+	if a.Towns()[0].Run.Phase.String() != "planning" {
+		t.Fatal("polling fingerprint unexpectedly performed a run evidence Read")
+	}
+}
+
 func TestFirstScanPublishesAuthoritativeFingerprintScope(t *testing.T) {
 	repo := filepath.Join(t.TempDir(), "busy")
 	now := time.Now().UTC()
