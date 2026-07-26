@@ -261,6 +261,7 @@ type ScanReport struct {
 	// PresenceShift reports that local run evidence changed in this pass.
 	// Like occupancy, it is volatile display state and never persisted.
 	PresenceShift bool
+	Retry         bool
 }
 
 // ConnectRoot records a new root directory and scans it. The root must
@@ -331,8 +332,11 @@ func (a *App) scan(repos []string, now time.Time, pruneMissing bool) (ScanReport
 			gitFP := gitscan.Fingerprint(repo)
 			runFP := agentrun.Fingerprint(repo)
 			evs, err := gitscan.Scan(repo, known[repo], now)
-			run, scope := agentrun.ReadWithScope(repo, now)
-			runCursor := runFP.For(scope)
+			run, scope, stable := agentrun.ReadWithScope(repo, now)
+			runCursor := ""
+			if stable {
+				runCursor = runFP.For(scope)
+			}
 			if runCursor == "" {
 				run = agentrun.Presence{}
 			}
@@ -348,11 +352,14 @@ func (a *App) scan(repos []string, now time.Time, pruneMissing bool) (ScanReport
 	var fresh []events.Event
 	for _, r := range results {
 		if r.err != nil {
+			rep.Retry = true
 			rep.Errors = append(rep.Errors, r.repo+": "+r.err.Error())
 			continue
 		}
 		if r.fp != "" {
 			rep.Fingerprints[r.repo] = r.fp
+		} else {
+			rep.Retry = true
 		}
 		if len(r.evs) > 0 {
 			rep.Changed++

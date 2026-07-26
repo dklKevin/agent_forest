@@ -235,6 +235,59 @@ func TestScanDoneRebuildsOnOccupancyShift(t *testing.T) {
 	}
 }
 
+func TestScanErrorsPublishNegativePresenceShiftIncludingConnect(t *testing.T) {
+	for _, kind := range []scanKind{
+		scanStartup, scanConnect, scanRefresh, scanLive, scanRetry,
+	} {
+		t.Run(kindName(kind), func(t *testing.T) {
+			path := "/repos/keepsake"
+			town := uiRepoTown("keepsake", path, false, "", time.Now())
+			town.Run = agentrun.Presence{
+				Phase: agentrun.Building, Active: true, UpdatedAt: time.Now(),
+			}
+			a := &app.App{Dir: t.TempDir(), Settings: &store.Settings{}}
+			m := persistedUIModel(t, town, a)
+			m.fps[path] = "old"
+
+			mm, _ := m.scanDone(scanDoneMsg{
+				kind: kind,
+				rep: app.ScanReport{
+					PresenceShift: true,
+					Fingerprints:  map[string]string{path: "new"},
+				},
+				err: os.ErrPermission,
+			})
+			m = mm.(Model)
+			if len(m.world.Sites) != 0 {
+				t.Fatal("error path retained negatively published presence")
+			}
+			if m.fps[path] == "new" {
+				t.Fatal("error path published a positive polling cursor")
+			}
+			if !m.retryFull {
+				t.Fatal("error path did not request a retry")
+			}
+		})
+	}
+}
+
+func kindName(kind scanKind) string {
+	switch kind {
+	case scanStartup:
+		return "startup"
+	case scanConnect:
+		return "connect"
+	case scanRefresh:
+		return "refresh"
+	case scanLive:
+		return "live"
+	case scanRetry:
+		return "retry"
+	default:
+		return "unknown"
+	}
+}
+
 func TestScanLiveAggregatesOccupancyShift(t *testing.T) {
 	t.Setenv("AGENTFOREST_HOME", t.TempDir())
 	root := t.TempDir()
@@ -433,6 +486,72 @@ func TestFailedLivePollRetriesUnchangedFingerprint(t *testing.T) {
 	m.lastPoll = time.Now().Add(-pollEvery)
 	if cmd := m.maybePoll(); cmd != nil {
 		t.Fatal("successful retry did not suppress a duplicate unchanged scan")
+	}
+}
+
+func TestEmptyPollFingerprintFailsClosedAndKeepsRetrying(t *testing.T) {
+	t.Setenv("AGENTFOREST_HOME", t.TempDir())
+	root := t.TempDir()
+	repo := filepath.Join(root, "busy")
+	mkUIRepo(t, repo)
+	evidence := filepath.Join(repo, ".agentforest", "runs", "one", "events.jsonl")
+	if err := os.MkdirAll(filepath.Dir(evidence), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line := `{"at":"` + time.Now().UTC().Format(time.RFC3339Nano) + `","phase":"building"}` + "\n"
+	if err := os.WriteFile(evidence, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a, err := app.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := a.ConnectRoot(root, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := a.Towns()[0].Path
+	baseline := initial.Fingerprints[key]
+	if baseline == "" || !a.Towns()[0].Run.Available() {
+		t.Fatal("test setup did not publish initial presence and cursor")
+	}
+	m := persistedUIModel(t, a.Towns()[0], a)
+	mm, _ := m.scanDone(scanDoneMsg{
+		id: m.activeScan, kind: scanStartup, rep: initial,
+	})
+	m = mm.(Model)
+
+	if err := os.Remove(evidence); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(evidence, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if fp := app.PollFingerprint(key, baseline); fp != "" {
+		t.Fatalf("unsafe evidence published polling fingerprint %q", fp)
+	}
+	m.lastPoll = time.Now().Add(-pollEvery)
+	cmd := m.maybePoll()
+	if cmd == nil || !m.scanning {
+		t.Fatal("empty polling fingerprint suppressed fail-closed rescan")
+	}
+	failedClosed := cmd().(scanDoneMsg)
+	if !failedClosed.rep.Retry || !failedClosed.rep.PresenceShift {
+		t.Fatalf("unsafe evidence scan did not publish negative retry state: %+v", failedClosed)
+	}
+	mm, _ = m.scanDone(failedClosed)
+	m = mm.(Model)
+	if len(m.world.Sites) != 1 || m.world.Sites[0].Town.Run.Available() {
+		t.Fatal("unsafe evidence remained visible after negative publication")
+	}
+	m.lastPoll = time.Now().Add(-pollEvery)
+	retry := m.maybePoll()
+	if retry == nil || !m.scanning {
+		t.Fatal("identity uncertainty did not schedule a retry")
+	}
+	if msg := retry().(scanDoneMsg); msg.kind != scanRetry {
+		t.Fatalf("identity retry kind = %v, want scanRetry", msg.kind)
 	}
 }
 

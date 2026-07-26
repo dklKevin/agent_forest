@@ -59,6 +59,32 @@ func TestOpenFormatBuildsBoundedCuratedReplay(t *testing.T) {
 	}
 }
 
+func TestOpenFormatRejectsForeignAndTraversalPathsPortably(t *testing.T) {
+	tests := map[string]bool{
+		`internal/agentrun/read.go`: true,
+		`internal\agentrun\read.go`: true,
+		`C:\Users\name\file.go`:     false,
+		`C:/Users/name/file.go`:     false,
+		`C:file.go`:                 false,
+		`\\server\share\file.go`:    false,
+		`//server/share/file.go`:    false,
+		`\rooted\file.go`:           false,
+		`../secret`:                 false,
+		`..\secret`:                 false,
+		`safe\..\..\secret`:         false,
+	}
+	for input, wantOK := range tests {
+		got, ok := cleanRelativePath(input)
+		if ok != wantOK {
+			t.Fatalf("cleanRelativePath(%q) = %q, %v; want accepted=%v",
+				input, got, ok, wantOK)
+		}
+		if ok && strings.Contains(got, `\`) {
+			t.Fatalf("cleanRelativePath(%q) retained a foreign separator: %q", input, got)
+		}
+	}
+}
+
 func TestOpenFormatReplaysAllFieldsInTimestampOrder(t *testing.T) {
 	repo := t.TempDir()
 	now := time.Date(2026, 7, 25, 18, 0, 0, 0, time.UTC)
@@ -563,6 +589,30 @@ func TestCompatibilityConsensusIncludesLogsBeyondReplayStepLimit(t *testing.T) {
 	}
 }
 
+func TestCompatibilityConsensusRetainsEveryBoundedLeaderSummary(t *testing.T) {
+	repo := t.TempDir()
+	now := time.Now().UTC()
+	run := filepath.Join(repo, ".gnhf", "runs", "summary-consensus")
+	var notes strings.Builder
+	for i := 1; i <= maxSteps+2; i++ {
+		log := filepath.Join(run, fmt.Sprintf("iteration-%d.jsonl", i))
+		put(t, log, `{"type":"item.started"}`+"\n")
+		at := now.Add(-time.Minute)
+		if i <= 2 {
+			at = now
+		}
+		if err := os.Chtimes(log, at, at); err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintf(&notes, "### Iteration %d\n**Summary:** summary %d\n", i, i)
+	}
+	put(t, filepath.Join(run, "notes.md"), notes.String())
+
+	if p := Read(repo, now); p.Available() {
+		t.Fatalf("discarded maximum-mtime summaries produced false consensus: %+v", p)
+	}
+}
+
 func TestCompatibilityDuplicateAndNewerTruthAreOrderIndependent(t *testing.T) {
 	now := time.Now().UTC()
 	t.Run("identical duplicates", func(t *testing.T) {
@@ -822,6 +872,55 @@ func TestAuthoritativeRootNamespaceMutationAcrossTierScanFailsClosed(t *testing.
 	}
 }
 
+func TestFinalTierRootValidationCoversPostAuditMutation(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, string)
+	}{
+		{
+			name: "namespace",
+			mutate: func(t *testing.T, root string) {
+				put(t, filepath.Join(root, "late.txt"), "late")
+			},
+		},
+		{
+			name: "identity",
+			mutate: func(t *testing.T, root string) {
+				oldRoot := root + ".old"
+				if err := os.Rename(root, oldRoot); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(root, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(filepath.Join(oldRoot, "initial"),
+					filepath.Join(root, "initial")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := t.TempDir()
+			now := time.Now().UTC()
+			put(t, openLog(repo, "initial"), event(now.Add(-time.Minute), Planning, ""))
+			root := filepath.Join(repo, ".agentforest", "runs")
+			before, err := safeReadDirSnapshot(root, maxDirEntries)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runs, err := recentRunDirsFromSnapshot(root, before)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tierSnapshotStable(root, before, runs, func() { tt.mutate(t, root) }) {
+				t.Fatal("post-audit root mutation passed final validation")
+			}
+		})
+	}
+}
+
 func TestOverflowingGNHFCannotVetoAuthoritativeTruth(t *testing.T) {
 	repo := t.TempDir()
 	now := time.Now().UTC()
@@ -1046,8 +1145,8 @@ func TestFingerprintIncludesCompatibilityAfterCleanAuthoritativeAbsence(t *testi
 	put(t, openLog(repo, "no-observation"), "{}\n")
 	compatibility := filepath.Join(repo, ".gnhf", "runs", "compatibility", "iteration-1.jsonl")
 	put(t, compatibility, `{"type":"item.started"}`+"\n")
-	p, scope := ReadWithScope(repo, time.Now())
-	if p.Phase != Building || scope != FingerprintCompatibility {
+	p, scope, stable := ReadWithScope(repo, time.Now())
+	if p.Phase != Building || scope != FingerprintCompatibility || !stable {
 		t.Fatalf("compatibility setup was not selected: %+v", p)
 	}
 
@@ -1175,6 +1274,34 @@ func TestSafeReadFileRejectsAtomicPathReplacement(t *testing.T) {
 	if err == nil || data != nil || !budget.uncertain {
 		t.Fatalf("atomic pathname replacement was accepted: bytes=%d uncertain=%v",
 			len(data), budget.uncertain)
+	}
+}
+
+func TestReadWithScopePropagatesConcurrentIdentityUncertainty(t *testing.T) {
+	repo := t.TempDir()
+	now := time.Now().UTC()
+	path := openLog(repo, "replaced")
+	put(t, path, event(now.Add(-time.Minute), Planning, ""))
+	preRead := Fingerprint(repo)
+	budget := &readBudget{remaining: maxOpenBytes}
+	budget.beforeRead = func(got string) {
+		if got != path {
+			return
+		}
+		if err := os.Rename(path, path+".old"); err != nil {
+			t.Fatal(err)
+		}
+		put(t, path, event(now, Testing, ""))
+	}
+
+	p, scope, stable := readWithScopeBudgets(repo, now, budget,
+		&readBudget{remaining: maxGNHFBytes})
+	if p.Available() || scope != FingerprintAuthoritative || stable {
+		t.Fatalf("identity-changing read reported stable evidence: presence=%+v scope=%v stable=%v",
+			p, scope, stable)
+	}
+	if cursor := preRead.For(scope); cursor == "" {
+		t.Fatal("test setup did not capture the pre-read cursor that must be refused")
 	}
 }
 

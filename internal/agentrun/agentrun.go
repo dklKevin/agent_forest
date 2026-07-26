@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -204,30 +205,38 @@ func Read(repo string, now time.Time) Presence {
 }
 
 func readWithBudgets(repo string, now time.Time, openLimit, gnhfLimit int64) Presence {
-	p, _ := readWithScope(repo, now, openLimit, gnhfLimit)
+	p, _, _ := readWithScope(repo, now, openLimit, gnhfLimit)
 	return p
 }
 
 // ReadWithScope returns the selected presence and the evidence scope that may
-// invalidate it during foreground polling.
-func ReadWithScope(repo string, now time.Time) (Presence, FingerprintScope) {
+// invalidate it during foreground polling. Stable is false when the selected
+// tier changed or could not be validated during the read.
+func ReadWithScope(repo string, now time.Time) (Presence, FingerprintScope, bool) {
 	return readWithScope(repo, now, maxOpenBytes, maxGNHFBytes)
 }
 
-func readWithScope(repo string, now time.Time, openLimit, gnhfLimit int64) (Presence, FingerprintScope) {
-	authoritative := scanTier(repo, ".agentforest", now, &readBudget{remaining: openLimit})
+func readWithScope(repo string, now time.Time, openLimit, gnhfLimit int64) (Presence, FingerprintScope, bool) {
+	return readWithScopeBudgets(repo, now,
+		&readBudget{remaining: openLimit},
+		&readBudget{remaining: gnhfLimit},
+	)
+}
+
+func readWithScopeBudgets(repo string, now time.Time, openBudget, gnhfBudget *readBudget) (Presence, FingerprintScope, bool) {
+	authoritative := scanTier(repo, ".agentforest", now, openBudget)
 	if authoritative.uncertain {
-		return Presence{}, FingerprintAuthoritative
+		return Presence{}, FingerprintAuthoritative, false
 	}
 	if len(authoritative.found) > 0 {
-		return selectPresence(authoritative.found), FingerprintAuthoritative
+		return selectPresence(authoritative.found), FingerprintAuthoritative, true
 	}
 
-	compatibility := scanTier(repo, ".gnhf", now, &readBudget{remaining: gnhfLimit})
+	compatibility := scanTier(repo, ".gnhf", now, gnhfBudget)
 	if compatibility.uncertain {
-		return Presence{}, FingerprintCompatibility
+		return Presence{}, FingerprintCompatibility, false
 	}
-	return selectPresence(compatibility.found), FingerprintCompatibility
+	return selectPresence(compatibility.found), FingerprintCompatibility, true
 }
 
 func scanTier(repo, provider string, now time.Time, budget *readBudget) tierResult {
@@ -284,15 +293,32 @@ func scanTier(repo, provider string, now time.Time, budget *readBudget) tierResu
 			found = append(found, presenceResult{p: p, causal: provider == ".agentforest"})
 		}
 	}
-	after, err := safeReadDirSnapshot(root, maxDirEntries)
-	if err != nil || !sameDirSnapshots(before, after) {
-		return tierResult{uncertain: true}
-	}
-	afterRuns, err := recentRunDirsFromSnapshot(root, after)
-	if err != nil || !sameRunDirs(entries, afterRuns) {
+	if !tierSnapshotStable(root, before, entries, nil) {
 		return tierResult{uncertain: true}
 	}
 	return tierResult{found: found}
+}
+
+func tierSnapshotStable(root string, before dirSnapshot, runs []runDir, afterRunAudit func()) bool {
+	after, err := safeReadDirSnapshot(root, maxDirEntries)
+	if err != nil || !sameDirSnapshots(before, after) {
+		return false
+	}
+	auditedRuns, err := recentRunDirsFromSnapshot(root, after)
+	if err != nil || !sameRunDirs(runs, auditedRuns) {
+		return false
+	}
+	if afterRunAudit != nil {
+		afterRunAudit()
+	}
+	final, err := safeReadDirSnapshot(root, maxDirEntries)
+	if err != nil || !sameDirSnapshots(before, final) {
+		return false
+	}
+	if !sameDirSnapshots(after, final) {
+		return false
+	}
+	return true
 }
 
 // selectPresence admits a winning run only when every candidate at the same
@@ -497,7 +523,11 @@ func readGNHFRunObservations(dir string, now time.Time, budget *readBudget) []Pr
 	summaries := map[int]string{}
 	notes := filepath.Join(dir, "notes.md")
 	if _, ok := regularEvidenceInfo(notes); ok {
-		summaries = noteSummaries(notes, budget)
+		iterations := make(map[int]struct{}, len(logs))
+		for _, path := range logs {
+			iterations[iterationNumber(path)] = struct{}{}
+		}
+		summaries = noteSummaries(notes, budget, iterations)
 	}
 	type observation struct {
 		phase     Phase
@@ -925,7 +955,7 @@ func forEachCompleteLine(data []byte, fn func([]byte)) {
 	}
 }
 
-func noteSummaries(path string, budget *readBudget) map[int]string {
+func noteSummaries(path string, budget *readBudget, iterations map[int]struct{}) map[int]string {
 	out := map[int]string{}
 	data, err := safeReadFile(path, budget)
 	if err != nil {
@@ -938,18 +968,10 @@ func noteSummaries(path string, budget *readBudget) map[int]string {
 			current, _ = strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "### Iteration ")))
 			return
 		}
-		if current > 0 && strings.HasPrefix(line, "**Summary:**") {
+		if _, wanted := iterations[current]; current > 0 && wanted &&
+			strings.HasPrefix(line, "**Summary:**") {
 			if v := cleanText(strings.TrimSpace(strings.TrimPrefix(line, "**Summary:**"))); v != "" {
 				out[current] = v
-				if len(out) > maxSteps {
-					oldest := current
-					for n := range out {
-						if n < oldest {
-							oldest = n
-						}
-					}
-					delete(out, oldest)
-				}
 			}
 		}
 	})
@@ -999,11 +1021,19 @@ func cleanText(s string) string {
 }
 
 func cleanRelativePath(path string) (string, bool) {
-	if path == "" || filepath.IsAbs(path) || !utf8.ValidString(path) {
+	if path == "" || !utf8.ValidString(path) {
 		return "", false
 	}
-	clean := filepath.Clean(path)
-	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+	portable := strings.ReplaceAll(path, "\\", "/")
+	if strings.HasPrefix(portable, "/") ||
+		(len(portable) >= 2 &&
+			((portable[0] >= 'a' && portable[0] <= 'z') ||
+				(portable[0] >= 'A' && portable[0] <= 'Z')) &&
+			portable[1] == ':') {
+		return "", false
+	}
+	clean := pathpkg.Clean(portable)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
 		return "", false
 	}
 	for _, r := range clean {
@@ -1011,7 +1041,8 @@ func cleanRelativePath(path string) (string, bool) {
 			return "", false
 		}
 	}
-	return cleanText(filepath.ToSlash(clean)), true
+	clean = cleanText(clean)
+	return clean, clean != ""
 }
 
 // Fingerprint returns cheap metadata-only digests for both authority scopes.

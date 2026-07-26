@@ -602,6 +602,46 @@ func TestFailedGitScanClearsRemovedPriorActivePresenceWithoutAdvancingCursor(t *
 	}
 }
 
+func TestUncertainRunReadClearsPresenceWithoutCursorAndRequestsRetry(t *testing.T) {
+	t.Setenv("AGENTFOREST_HOME", t.TempDir())
+	root := t.TempDir()
+	repo := filepath.Join(root, "keep")
+	now := time.Now().UTC()
+	mkRepo(t, repo, now.Add(-time.Hour), "main.go", "package main")
+	evidence := writeRunEvidence(t, repo, now.Add(-time.Minute), "building", "must clear")
+
+	a, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := a.ConnectRoot(root, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := a.Towns()[0].Path
+	if initial.Fingerprints[key] == "" || !a.Towns()[0].Run.Available() {
+		t.Fatal("test setup did not publish initial presence and cursor")
+	}
+	if err := os.Remove(evidence); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(evidence, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := a.RescanRepo(key, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.Retry || !rep.PresenceShift || a.Towns()[0].Run.Available() {
+		t.Fatalf("uncertain evidence did not fail closed with retry: report=%+v run=%+v",
+			rep, a.Towns()[0].Run)
+	}
+	if _, ok := rep.Fingerprints[key]; ok {
+		t.Fatal("uncertain evidence published a polling cursor")
+	}
+}
+
 func TestPollFingerprintChangesAfterSettledAtomicEvidenceReplacementBeforeRead(t *testing.T) {
 	t.Setenv("AGENTFOREST_HOME", t.TempDir())
 	root := t.TempDir()

@@ -245,6 +245,7 @@ func scanCmd(a *app.App, id uint64, kind scanKind, root string, paths []string) 
 				rep.NewEvents += r.NewEvents
 				rep.OccupancyShift = rep.OccupancyShift || r.OccupancyShift
 				rep.PresenceShift = rep.PresenceShift || r.PresenceShift
+				rep.Retry = rep.Retry || r.Retry
 				rep.Errors = append(rep.Errors, r.Errors...)
 				if rep.Fingerprints == nil {
 					rep.Fingerprints = map[string]string{}
@@ -461,7 +462,8 @@ func (m *Model) maybePoll() tea.Cmd {
 		}
 		fp := app.PollFingerprint(path, m.fps[path])
 		if fp == "" {
-			continue // repo gone: it stands, and decays, on its history
+			changed = append(changed, path)
+			continue
 		}
 		if old, ok := m.fps[path]; !ok || old != fp {
 			changed = append(changed, path)
@@ -539,8 +541,13 @@ func (m Model) scanDone(msg scanDoneMsg) (tea.Model, tea.Cmd) {
 			m.fps[path] = fp
 		}
 	}
-	if msg.kind == scanStartup || msg.kind == scanRetry {
-		m.retryFull = msg.err != nil || len(msg.rep.Errors) > 0
+	if msg.err != nil || len(msg.rep.Errors) > 0 || msg.rep.Retry {
+		m.retryFull = true
+	} else if msg.kind == scanStartup || msg.kind == scanRetry {
+		m.retryFull = false
+	}
+	if msg.err != nil && msg.rep.PresenceShift && m.app != nil {
+		m.rebuildWorld()
 	}
 	if msg.kind == scanConnect {
 		return m.connectDone(msg)
