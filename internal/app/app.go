@@ -14,11 +14,14 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/dklKevin/agentforest/internal/agentrun"
 	"github.com/dklKevin/agentforest/internal/events"
 	"github.com/dklKevin/agentforest/internal/gitscan"
 	"github.com/dklKevin/agentforest/internal/model"
 	"github.com/dklKevin/agentforest/internal/store"
 )
+
+const absentPollFingerprint = "absent"
 
 // App is the loaded persistent state of one forest.
 type App struct {
@@ -27,13 +30,16 @@ type App struct {
 	HasSettings bool // settings.json existed; false means first run
 	Skipped     int  // unreadable event-log lines skipped while loading
 
-	// events and occupancy cross together from the scan goroutine to the UI.
+	// Successful events, occupancy, and local run evidence cross together from
+	// the scan goroutine to the UI. Fail-closed run unavailability may publish
+	// independently so a git or persistence failure cannot retain a stale mark.
 	// stateMu guards every access and lets Towns copy one consistent view.
 	// Event entries are immutable after publication, so copying the slice is
 	// sufficient; occupancy is copied because its map is updated in place.
 	stateMu   sync.RWMutex
 	events    []events.Event
 	occupancy map[string]gitscan.Occupancy
+	runs      map[string]agentrun.Presence
 }
 
 // Load reads settings and the event log from the storage directory.
@@ -99,7 +105,7 @@ func (a *App) Connected() bool {
 // them later costs nothing. Finish state and epitaphs are derived state,
 // folded from the log's finish/unfinish events.
 func (a *App) Towns() []*model.Town {
-	evs, occ := a.townSnapshot()
+	evs, occ, runs := a.townSnapshot()
 	repos := events.Reduce(evs)
 	towns := make([]*model.Town, 0, len(repos))
 	for _, r := range repos {
@@ -110,6 +116,7 @@ func (a *App) Towns() []*model.Town {
 		if o, ok := occ[r.Path]; ok {
 			t.Occupancy = model.Occupancy{Dirty: o.Dirty, Branch: o.Branch, Worktrees: o.Worktrees}
 		}
+		t.Run = runs[r.Path]
 		towns = append(towns, t)
 	}
 	return towns
@@ -124,21 +131,22 @@ func (a *App) EventsSnapshot() []events.Event {
 	return append([]events.Event(nil), a.events...)
 }
 
-// townSnapshot copies the event slice and occupancy map under one read lock.
-// The lock is held only for the copies, never across reducing, rendering, git,
-// or store I/O.
-func (a *App) townSnapshot() ([]events.Event, map[string]gitscan.Occupancy) {
+// townSnapshot copies the event slice, occupancy map, and run evidence under
+// one read lock. The lock is held only for the copies, never across reducing,
+// rendering, git, filesystem-adapter, or store I/O.
+func (a *App) townSnapshot() ([]events.Event, map[string]gitscan.Occupancy, map[string]agentrun.Presence) {
 	a.stateMu.RLock()
 	defer a.stateMu.RUnlock()
 	evs := append([]events.Event(nil), a.events...)
-	if len(a.occupancy) == 0 {
-		return evs, nil
-	}
-	snap := make(map[string]gitscan.Occupancy, len(a.occupancy))
+	occ := make(map[string]gitscan.Occupancy, len(a.occupancy))
 	for k, v := range a.occupancy {
-		snap[k] = v
+		occ[k] = v
 	}
-	return evs, snap
+	runs := make(map[string]agentrun.Presence, len(a.runs))
+	for k, v := range a.runs {
+		runs[k] = v
+	}
+	return evs, occ, runs
 }
 
 // EpitaphMaxRunes is the carving limit. An epitaph is carved, not written:
@@ -244,13 +252,18 @@ func joinOr(list []string, empty string) string {
 
 // ScanReport summarizes one reconcile pass.
 type ScanReport struct {
-	Repos     int      // repositories scanned after excludes are applied
-	Changed   int      // repositories that produced new events
-	NewEvents int      // events appended to the log
-	Errors    []string // per-repo scan failures, "path: reason"
+	Repos        int      // repositories scanned after excludes are applied
+	Changed      int      // repositories that produced new events
+	NewEvents    int      // events appended to the log
+	Errors       []string // per-repo scan failures, "path: reason"
+	Fingerprints map[string]string
 	// OccupancyShift reports that some repo's working-state read changed in
 	// this pass, so camps need a world rebuild even when no events landed.
 	OccupancyShift bool
+	// PresenceShift reports that local run evidence changed in this pass.
+	// Like occupancy, it is volatile display state and never persisted.
+	PresenceShift bool
+	Retry         bool
 }
 
 // ConnectRoot records a new root directory and scans it. The root must
@@ -294,11 +307,11 @@ func (a *App) RescanRepo(path string, now time.Time) (ScanReport, error) {
 }
 
 // scan runs the git adapter over repos in parallel and appends whatever the
-// log is missing, in deterministic repo order. Each repo's working state is
-// read in the same pass and held in memory only: occupancy rides the scan
-// cadence, never the log.
+// log is missing, in deterministic repo order. Each repo's working state and
+// local run evidence are read in the same pass and held in memory only: both
+// ride the scan cadence, never the log.
 func (a *App) scan(repos []string, now time.Time, pruneMissing bool) (ScanReport, error) {
-	rep := ScanReport{Repos: len(repos)}
+	rep := ScanReport{Repos: len(repos), Fingerprints: make(map[string]string, len(repos))}
 	known := KnownByRepo(a.EventsSnapshot())
 
 	type result struct {
@@ -306,6 +319,8 @@ func (a *App) scan(repos []string, now time.Time, pruneMissing bool) (ScanReport
 		evs  []events.Event
 		err  error
 		occ  gitscan.Occupancy
+		run  agentrun.Presence
+		fp   string
 	}
 	results := make([]result, len(repos))
 	var wg sync.WaitGroup
@@ -316,8 +331,26 @@ func (a *App) scan(repos []string, now time.Time, pruneMissing bool) (ScanReport
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			if repositoryAbsent(repo) {
+				results[i] = result{repo: repo, fp: absentPollFingerprint}
+				return
+			}
+			gitFP := gitscan.Fingerprint(repo)
+			runFP := agentrun.Fingerprint(repo)
 			evs, err := gitscan.Scan(repo, known[repo], now)
-			results[i] = result{repo, evs, err, gitscan.ReadOccupancy(repo)}
+			run, scope, stable := agentrun.ReadWithScope(repo, now)
+			runCursor := ""
+			if stable {
+				runCursor = runFP.For(scope)
+			}
+			if runCursor == "" {
+				run = agentrun.Presence{}
+			}
+			results[i] = result{
+				repo: repo, evs: evs, err: err,
+				occ: gitscan.ReadOccupancy(repo), run: run,
+				fp: pollFingerprint(gitFP, runCursor),
+			}
 		}(i, repo)
 	}
 	wg.Wait()
@@ -325,14 +358,36 @@ func (a *App) scan(repos []string, now time.Time, pruneMissing bool) (ScanReport
 	var fresh []events.Event
 	for _, r := range results {
 		if r.err != nil {
+			rep.Retry = true
 			rep.Errors = append(rep.Errors, r.repo+": "+r.err.Error())
 			continue
+		}
+		if r.fp != "" {
+			rep.Fingerprints[r.repo] = r.fp
+		} else {
+			rep.Retry = true
 		}
 		if len(r.evs) > 0 {
 			rep.Changed++
 			fresh = append(fresh, r.evs...)
 		}
 	}
+
+	// Unavailability is safer than stale presence and does not depend on a git
+	// event commit. Publish only the negative state here: valid new run evidence
+	// and occupancy still cross atomically with successful event publication
+	// below. An errored repository publishes no cursor, so the next poll retries.
+	a.stateMu.Lock()
+	for _, r := range results {
+		if r.run.Available() {
+			continue
+		}
+		if previous, ok := a.runs[r.repo]; ok && previous.Available() {
+			delete(a.runs, r.repo)
+			rep.PresenceShift = true
+		}
+	}
+	a.stateMu.Unlock()
 
 	if len(fresh) > 0 {
 		if err := store.AppendEvents(a.Dir, fresh); err != nil {
@@ -344,11 +399,25 @@ func (a *App) scan(repos []string, now time.Time, pruneMissing bool) (ScanReport
 	if a.occupancy == nil {
 		a.occupancy = map[string]gitscan.Occupancy{}
 	}
+	if a.runs == nil {
+		a.runs = map[string]agentrun.Presence{}
+	}
 	for _, r := range results {
+		if r.err != nil {
+			continue
+		}
 		if a.occupancy[r.repo] != r.occ {
 			rep.OccupancyShift = true
 		}
 		a.occupancy[r.repo] = r.occ
+		if !agentrun.Equal(a.runs[r.repo], r.run) {
+			rep.PresenceShift = true
+		}
+		if r.run.Available() {
+			a.runs[r.repo] = r.run
+		} else {
+			delete(a.runs, r.repo)
+		}
 	}
 	if pruneMissing {
 		kept := make(map[string]bool, len(repos))
@@ -361,6 +430,12 @@ func (a *App) scan(repos []string, now time.Time, pruneMissing bool) (ScanReport
 				rep.OccupancyShift = true
 			}
 		}
+		for path := range a.runs {
+			if !kept[path] {
+				delete(a.runs, path)
+				rep.PresenceShift = true
+			}
+		}
 	}
 	if len(fresh) > 0 {
 		a.events = append(a.events, fresh...)
@@ -368,6 +443,35 @@ func (a *App) scan(repos []string, now time.Time, pruneMissing bool) (ScanReport
 	}
 	a.stateMu.Unlock()
 	return rep, nil
+}
+
+// PollFingerprint returns the current git and local-run metadata cursor. A
+// previous authoritative cursor keeps lower-tier compatibility metadata out of
+// subsequent polls.
+func PollFingerprint(repo string, previous ...string) string {
+	if repositoryAbsent(repo) {
+		return absentPollFingerprint
+	}
+	scope := agentrun.FingerprintCompatibility
+	if len(previous) > 0 {
+		parts := strings.Split(previous[0], ":")
+		if len(parts) >= 2 && parts[len(parts)-2] == "a" {
+			scope = agentrun.FingerprintAuthoritative
+		}
+	}
+	return pollFingerprint(gitscan.Fingerprint(repo), agentrun.FingerprintFor(repo, scope))
+}
+
+func repositoryAbsent(path string) bool {
+	_, err := os.Lstat(path)
+	return os.IsNotExist(err)
+}
+
+func pollFingerprint(gitFP, runFP string) string {
+	if gitFP == "" || runFP == "" {
+		return ""
+	}
+	return gitFP + ":" + runFP
 }
 
 // KnownByRepo derives, per repository, what the event log already recorded:

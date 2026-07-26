@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dklKevin/agentforest/internal/agentrun"
 	"github.com/dklKevin/agentforest/internal/almanac"
 	"github.com/dklKevin/agentforest/internal/app"
 	"github.com/dklKevin/agentforest/internal/events"
@@ -27,6 +28,8 @@ func runCommand(cmd string, args []string) int {
 		return cmdTowns()
 	case "almanac":
 		return cmdAlmanac(args)
+	case "replay":
+		return cmdReplay(args)
 	case "refresh":
 		return cmdRefresh()
 	case "exclude":
@@ -42,7 +45,7 @@ func runCommand(cmd string, args []string) int {
 		return 0
 	default:
 		fmt.Printf("error: unknown command %q\n", cmd)
-		fmt.Println("help: commands are connect, towns, almanac, refresh, exclude, include, finish, unfinish")
+		fmt.Println("help: commands are connect, towns, almanac, replay, refresh, exclude, include, finish, unfinish")
 		return 2
 	}
 }
@@ -87,6 +90,20 @@ forest by pressing a while inspecting a town.
 examples:
   agentforest almanac sidecar
   agentforest almanac ~/code/sidecar
+`)
+	case "replay":
+		fmt.Print(`replay: read a town's local work plaque
+
+usage:
+  agentforest replay <name|path>
+
+The plaque is a bounded, curated replay from local filesystem evidence:
+phase, aim, summaries, touched paths, verification, setbacks, and unresolved
+questions. AgentForest never sends it away or stores it in the forest log.
+
+examples:
+  agentforest replay sidecar
+  agentforest replay ~/code/sidecar
 `)
 	case "refresh":
 		fmt.Print(`refresh: rescan every connected root and append new history to the log
@@ -244,6 +261,66 @@ func cmdAlmanac(args []string) int {
 	fmt.Println("help[2]:")
 	fmt.Println("  Run `agentforest` to walk the forest")
 	fmt.Println("  Run `agentforest towns` to list every town")
+	return 0
+}
+
+func cmdReplay(args []string) int {
+	if len(args) != 1 {
+		fmt.Println("error: replay needs exactly one town name or path")
+		fmt.Println("help: agentforest replay <name|path>")
+		return 2
+	}
+	a, err := app.Load()
+	if err != nil {
+		return internalError(err)
+	}
+	key, err := a.FindTown(args[0])
+	if err != nil {
+		fmt.Println("error: " + err.Error())
+		fmt.Println("help: Run `agentforest towns` to see every town")
+		return 1
+	}
+	var name string
+	for _, t := range a.Towns() {
+		if t.Path == key {
+			name = t.Name
+			break
+		}
+	}
+	if name == "" {
+		name = args[0]
+	}
+	p := agentrun.Read(key, time.Now())
+	fmt.Println("work plaque: " + name)
+	if !p.Available() {
+		fmt.Println("  no local work evidence")
+		fmt.Println("help: a plaque appears only while supported local run files remain")
+		return 0
+	}
+	state := p.Phase.String()
+	if !p.Active {
+		state += " · quiet now"
+	}
+	fmt.Println("  phase: " + state)
+	if p.Objective != "" {
+		fmt.Println("  aim: " + p.Objective)
+	}
+	for _, step := range p.Steps {
+		fmt.Printf("  %s: %s\n", step.Phase.String(), step.Summary)
+	}
+	if len(p.Paths) > 0 {
+		fmt.Println("  touched: " + strings.Join(p.Paths, ", "))
+	}
+	if p.Verification != "" {
+		fmt.Println("  verification: " + p.Verification)
+	}
+	for _, failure := range p.Failures {
+		fmt.Println("  setback: " + failure)
+	}
+	for _, question := range p.Unresolved {
+		fmt.Println("  unresolved: " + question)
+	}
+	fmt.Println("help: AgentForest read this plaque locally and did not add it to the forest log")
 	return 0
 }
 

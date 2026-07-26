@@ -10,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/dklKevin/agentforest/internal/agentrun"
 	"github.com/dklKevin/agentforest/internal/almanac"
 	"github.com/dklKevin/agentforest/internal/app"
 	"github.com/dklKevin/agentforest/internal/canvas"
@@ -105,6 +106,14 @@ func mkUIRepo(t *testing.T, dir string) {
 func TestScanAndUIReadEventsConcurrently(t *testing.T) {
 	repo := filepath.Join(t.TempDir(), "live")
 	mkUIRepo(t, repo)
+	evidence := filepath.Join(repo, ".agentforest", "runs", "one", "events.jsonl")
+	if err := os.MkdirAll(filepath.Dir(evidence), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line := `{"at":"` + time.Now().UTC().Format(time.RFC3339Nano) + `","phase":"building"}` + "\n"
+	if err := os.WriteFile(evidence, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	a := &app.App{Dir: t.TempDir(), Settings: &store.Settings{}}
 	m := Model{app: a}
 
@@ -165,6 +174,9 @@ func TestScanAndUIReadEventsConcurrently(t *testing.T) {
 			if almanac.Fold(m.almanacEvents(), repo, time.Now()) == nil {
 				t.Fatal("scan history did not build an almanac")
 			}
+			if !a.Towns()[0].Run.Available() {
+				t.Fatal("atomic scan publication lost local run evidence")
+			}
 			return
 		default:
 			_ = a.Towns()
@@ -216,6 +228,64 @@ func TestScanDoneRebuildsOnOccupancyShift(t *testing.T) {
 	if m = mm.(Model); len(m.world.Sites) != 0 {
 		t.Fatal("an occupancy shift did not rebuild the world from app state")
 	}
+	m = persistedUIModel(t, uiRepoTown("keepsake", "/repos/keepsake", false, "", time.Now()), a)
+	mm, _ = m.Update(scanDoneMsg{kind: scanLive, rep: app.ScanReport{PresenceShift: true}})
+	if m = mm.(Model); len(m.world.Sites) != 0 {
+		t.Fatal("a presence shift did not rebuild the world from app state")
+	}
+}
+
+func TestScanErrorsPublishNegativePresenceShiftIncludingConnect(t *testing.T) {
+	for _, kind := range []scanKind{
+		scanStartup, scanConnect, scanRefresh, scanLive, scanRetry,
+	} {
+		t.Run(kindName(kind), func(t *testing.T) {
+			path := "/repos/keepsake"
+			town := uiRepoTown("keepsake", path, false, "", time.Now())
+			town.Run = agentrun.Presence{
+				Phase: agentrun.Building, Active: true, UpdatedAt: time.Now(),
+			}
+			a := &app.App{Dir: t.TempDir(), Settings: &store.Settings{}}
+			m := persistedUIModel(t, town, a)
+			m.fps[path] = "old"
+
+			mm, _ := m.scanDone(scanDoneMsg{
+				kind: kind,
+				rep: app.ScanReport{
+					PresenceShift: true,
+					Fingerprints:  map[string]string{path: "new"},
+				},
+				err: os.ErrPermission,
+			})
+			m = mm.(Model)
+			if len(m.world.Sites) != 0 {
+				t.Fatal("error path retained negatively published presence")
+			}
+			if m.fps[path] == "new" {
+				t.Fatal("error path published a positive polling cursor")
+			}
+			if !m.retryFull {
+				t.Fatal("error path did not request a retry")
+			}
+		})
+	}
+}
+
+func kindName(kind scanKind) string {
+	switch kind {
+	case scanStartup:
+		return "startup"
+	case scanConnect:
+		return "connect"
+	case scanRefresh:
+		return "refresh"
+	case scanLive:
+		return "live"
+	case scanRetry:
+		return "retry"
+	default:
+		return "unknown"
+	}
 }
 
 func TestScanLiveAggregatesOccupancyShift(t *testing.T) {
@@ -237,12 +307,418 @@ func TestScanLiveAggregatesOccupancyShift(t *testing.T) {
 	}
 
 	gitInUI(t, repo, "checkout", "-q", "-b", "wip")
-	msg := scanCmd(a, scanLive, "", []string{key})().(scanDoneMsg)
+	msg := scanCmd(a, 1, scanLive, "", []string{key})().(scanDoneMsg)
 	if msg.err != nil {
 		t.Fatal(msg.err)
 	}
 	if !msg.rep.OccupancyShift {
 		t.Fatalf("live scan dropped occupancy shift: %+v", msg.rep)
+	}
+}
+
+func TestScanLiveAggregatesPresenceShift(t *testing.T) {
+	t.Setenv("AGENTFOREST_HOME", t.TempDir())
+	root := t.TempDir()
+	repo := filepath.Join(root, "busy")
+	mkUIRepo(t, repo)
+
+	a, err := app.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.ConnectRoot(root, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	key, _ := a.FindTown("busy")
+	path := filepath.Join(repo, ".agentforest", "runs", "one", "events.jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line := `{"at":"` + time.Now().UTC().Format(time.RFC3339Nano) + `","phase":"planning"}` + "\n"
+	if err := os.WriteFile(path, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	msg := scanCmd(a, 1, scanLive, "", []string{key})().(scanDoneMsg)
+	if msg.err != nil || !msg.rep.PresenceShift {
+		t.Fatalf("live scan dropped presence shift: %+v", msg)
+	}
+	if msg.rep.Fingerprints[key] == "" {
+		t.Fatal("live scan dropped its pre-scan fingerprint")
+	}
+}
+
+func TestStartupScanSeedsFirstPollBaseline(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "busy")
+	mkUIRepo(t, repo)
+	town := uiRepoTown("busy", repo, false, "", time.Now())
+	a := &app.App{Dir: t.TempDir(), Settings: &store.Settings{}}
+	m := persistedUIModel(t, town, a)
+	fp := app.PollFingerprint(repo)
+	mm, _ := m.scanDone(scanDoneMsg{
+		kind: scanStartup,
+		rep:  app.ScanReport{Fingerprints: map[string]string{repo: fp}},
+	})
+	m = mm.(Model)
+	m.lastPoll = time.Now().Add(-pollEvery)
+
+	if cmd := m.maybePoll(); cmd != nil {
+		t.Fatal("first poll repeated the startup scan without a filesystem change")
+	}
+	if m.fps[repo] != fp {
+		t.Fatal("startup scan did not publish its fingerprint baseline")
+	}
+}
+
+func TestFailedScanDoesNotSeedFingerprintBaseline(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "busy")
+	mkUIRepo(t, repo)
+	town := uiRepoTown("busy", repo, false, "", time.Now())
+	a := &app.App{Dir: t.TempDir(), Settings: &store.Settings{}}
+	m := persistedUIModel(t, town, a)
+	fp := app.PollFingerprint(repo)
+
+	mm, _ := m.scanDone(scanDoneMsg{
+		kind: scanStartup,
+		rep:  app.ScanReport{Fingerprints: map[string]string{repo: fp}},
+		err:  os.ErrPermission,
+	})
+	m = mm.(Model)
+	if _, seeded := m.fps[repo]; seeded {
+		t.Fatal("failed scan published a fingerprint for state it withheld")
+	}
+	m.lastPoll = time.Now().Add(-pollEvery)
+	if cmd := m.maybePoll(); cmd == nil {
+		t.Fatal("failed scan fingerprint suppressed the automatic retry")
+	}
+}
+
+func TestFailedStartupRetriesFullDiscovery(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "new")
+	mkUIRepo(t, repo)
+	a := &app.App{
+		Dir:      t.TempDir(),
+		Settings: &store.Settings{Roots: []string{root}},
+	}
+	m := persistedUIModel(t, uiRepoTown("old", "", false, "", time.Now()), a)
+
+	mm, _ := m.scanDone(scanDoneMsg{kind: scanStartup, err: os.ErrPermission})
+	m = mm.(Model)
+	m.lastPoll = time.Now().Add(-pollEvery)
+	cmd := m.maybePoll()
+	if cmd == nil || !m.scanning {
+		t.Fatal("failed startup did not schedule full discovery retry")
+	}
+	msg := cmd().(scanDoneMsg)
+	if msg.kind != scanRetry || msg.err != nil || msg.rep.NewEvents == 0 {
+		t.Fatalf("full discovery retry = %+v", msg)
+	}
+}
+
+func TestFailedLivePollRetriesUnchangedFingerprint(t *testing.T) {
+	t.Setenv("AGENTFOREST_HOME", t.TempDir())
+	root := t.TempDir()
+	repo := filepath.Join(root, "busy")
+	mkUIRepo(t, repo)
+
+	a, err := app.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.ConnectRoot(root, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	m := persistedUIModel(t, a.Towns()[0], a)
+	key := a.Towns()[0].Path
+	baseline := app.PollFingerprint(key)
+	mm, _ := m.scanDone(scanDoneMsg{
+		id: m.activeScan, kind: scanStartup,
+		rep: app.ScanReport{Fingerprints: map[string]string{key: baseline}},
+	})
+	m = mm.(Model)
+
+	if err := os.WriteFile(filepath.Join(repo, "main.go"), []byte("package main // changed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitInUI(t, repo, "add", "-A")
+	gitInUI(t, repo, "commit", "-q", "-m", "changed")
+	changed := app.PollFingerprint(key)
+	if changed == baseline {
+		t.Fatal("test setup did not change the repository fingerprint")
+	}
+
+	goodDir := a.Dir
+	blocked := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocked, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a.Dir = blocked
+	m.lastPoll = time.Now().Add(-pollEvery)
+	cmd := m.maybePoll()
+	if cmd == nil || !m.scanning || m.fps[key] != baseline {
+		t.Fatalf("live poll committed provisional cursor: scanning=%v cursor=%q", m.scanning, m.fps[key])
+	}
+	failed := cmd().(scanDoneMsg)
+	if failed.err == nil {
+		t.Fatal("live scan unexpectedly persisted into a non-directory")
+	}
+	mm, _ = m.scanDone(failed)
+	m = mm.(Model)
+	if m.scanning || m.fps[key] != baseline {
+		t.Fatalf("failed live scan advanced cursor: scanning=%v cursor=%q", m.scanning, m.fps[key])
+	}
+
+	a.Dir = goodDir
+	m.lastPoll = time.Now().Add(-pollEvery)
+	retry := m.maybePoll()
+	if retry == nil {
+		t.Fatal("unchanged failed evidence was not retried")
+	}
+	succeeded := retry().(scanDoneMsg)
+	if succeeded.err != nil {
+		t.Fatalf("retry failed: %v", succeeded.err)
+	}
+	mm, _ = m.scanDone(succeeded)
+	m = mm.(Model)
+	if m.fps[key] != changed {
+		t.Fatalf("successful retry did not commit cursor: got %q want %q", m.fps[key], changed)
+	}
+	m.lastPoll = time.Now().Add(-pollEvery)
+	if cmd := m.maybePoll(); cmd != nil {
+		t.Fatal("successful retry did not suppress a duplicate unchanged scan")
+	}
+}
+
+func TestEmptyPollFingerprintFailsClosedAndKeepsRetrying(t *testing.T) {
+	t.Setenv("AGENTFOREST_HOME", t.TempDir())
+	root := t.TempDir()
+	repo := filepath.Join(root, "busy")
+	mkUIRepo(t, repo)
+	evidence := filepath.Join(repo, ".agentforest", "runs", "one", "events.jsonl")
+	if err := os.MkdirAll(filepath.Dir(evidence), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line := `{"at":"` + time.Now().UTC().Format(time.RFC3339Nano) + `","phase":"building"}` + "\n"
+	if err := os.WriteFile(evidence, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a, err := app.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := a.ConnectRoot(root, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := a.Towns()[0].Path
+	baseline := initial.Fingerprints[key]
+	if baseline == "" || !a.Towns()[0].Run.Available() {
+		t.Fatal("test setup did not publish initial presence and cursor")
+	}
+	m := persistedUIModel(t, a.Towns()[0], a)
+	mm, _ := m.scanDone(scanDoneMsg{
+		id: m.activeScan, kind: scanStartup, rep: initial,
+	})
+	m = mm.(Model)
+
+	if err := os.Remove(evidence); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(evidence, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if fp := app.PollFingerprint(key, baseline); fp != "" {
+		t.Fatalf("unsafe evidence published polling fingerprint %q", fp)
+	}
+	m.lastPoll = time.Now().Add(-pollEvery)
+	cmd := m.maybePoll()
+	if cmd == nil || !m.scanning {
+		t.Fatal("empty polling fingerprint suppressed fail-closed rescan")
+	}
+	failedClosed := cmd().(scanDoneMsg)
+	if !failedClosed.rep.Retry || !failedClosed.rep.PresenceShift {
+		t.Fatalf("unsafe evidence scan did not publish negative retry state: %+v", failedClosed)
+	}
+	mm, _ = m.scanDone(failedClosed)
+	m = mm.(Model)
+	if len(m.world.Sites) != 1 || m.world.Sites[0].Town.Run.Available() {
+		t.Fatal("unsafe evidence remained visible after negative publication")
+	}
+	m.lastPoll = time.Now().Add(-pollEvery)
+	retry := m.maybePoll()
+	if retry == nil || !m.scanning {
+		t.Fatal("identity uncertainty did not schedule a retry")
+	}
+	if msg := retry().(scanDoneMsg); msg.kind != scanRetry {
+		t.Fatalf("identity retry kind = %v, want scanRetry", msg.kind)
+	}
+}
+
+func TestVanishedRepositoryPollsOnceAndRestorationIsDetected(t *testing.T) {
+	t.Setenv("AGENTFOREST_HOME", t.TempDir())
+	root := t.TempDir()
+	repo := filepath.Join(root, "busy")
+	mkUIRepo(t, repo)
+	evidence := filepath.Join(repo, ".agentforest", "runs", "one", "events.jsonl")
+	if err := os.MkdirAll(filepath.Dir(evidence), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line := `{"at":"` + time.Now().UTC().Format(time.RFC3339Nano) + `","phase":"building"}` + "\n"
+	if err := os.WriteFile(evidence, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a, err := app.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := a.ConnectRoot(root, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := a.Towns()[0].Path
+	baseline := initial.Fingerprints[key]
+	m := persistedUIModel(t, a.Towns()[0], a)
+	mm, _ := m.scanDone(scanDoneMsg{
+		id: m.activeScan, kind: scanStartup, rep: initial,
+	})
+	m = mm.(Model)
+
+	if err := os.RemoveAll(repo); err != nil {
+		t.Fatal(err)
+	}
+	absent := app.PollFingerprint(key, baseline)
+	if absent == "" || absent == baseline {
+		t.Fatalf("confirmed absence fingerprint = %q, baseline %q", absent, baseline)
+	}
+	m.lastPoll = time.Now().Add(-pollEvery)
+	cmd := m.maybePoll()
+	if cmd == nil {
+		t.Fatal("repository disappearance was not scanned")
+	}
+	disappeared := cmd().(scanDoneMsg)
+	if disappeared.rep.Retry || len(disappeared.rep.Errors) != 0 ||
+		!disappeared.rep.PresenceShift || disappeared.rep.Fingerprints[key] != absent {
+		t.Fatalf("stable disappearance did not publish one negative state: %+v", disappeared)
+	}
+	mm, _ = m.scanDone(disappeared)
+	m = mm.(Model)
+	if m.retryFull || m.fps[key] != absent ||
+		len(m.world.Sites) != 1 || m.world.Sites[0].Town.Run.Available() {
+		t.Fatalf("stable absence state was not retained: retry=%v cursor=%q",
+			m.retryFull, m.fps[key])
+	}
+	m.lastPoll = time.Now().Add(-pollEvery)
+	if cmd := m.maybePoll(); cmd != nil {
+		t.Fatal("stable repository absence caused repeated polling")
+	}
+
+	mkUIRepo(t, repo)
+	restored := app.PollFingerprint(key, absent)
+	if restored == "" || restored == absent {
+		t.Fatalf("restored repository fingerprint = %q, absent %q", restored, absent)
+	}
+	m.lastPoll = time.Now().Add(-pollEvery)
+	cmd = m.maybePoll()
+	if cmd == nil {
+		t.Fatal("repository restoration was not detected")
+	}
+	restoredMsg := cmd().(scanDoneMsg)
+	if restoredMsg.err != nil || restoredMsg.rep.Retry ||
+		restoredMsg.rep.Fingerprints[key] != restored {
+		t.Fatalf("restored repository scan = %+v", restoredMsg)
+	}
+	mm, _ = m.scanDone(restoredMsg)
+	m = mm.(Model)
+	if m.retryFull || m.fps[key] != restored {
+		t.Fatalf("restoration cursor was not published: retry=%v cursor=%q",
+			m.retryFull, m.fps[key])
+	}
+	m.lastPoll = time.Now().Add(-pollEvery)
+	if cmd := m.maybePoll(); cmd != nil {
+		t.Fatal("restoration caused a duplicate unchanged scan")
+	}
+}
+
+func TestStaleScanCompletionCannotOverwriteNewerSuccess(t *testing.T) {
+	m := Model{
+		fps:      map[string]string{"/repo": "old"},
+		scanning: true, scanSeq: 2, activeScan: 2,
+	}
+	mm, _ := m.scanDone(scanDoneMsg{
+		id: 1, kind: scanLive,
+		rep: app.ScanReport{Fingerprints: map[string]string{"/repo": "stale"}},
+	})
+	m = mm.(Model)
+	if !m.scanning || m.activeScan != 2 || m.fps["/repo"] != "old" {
+		t.Fatalf("stale completion disturbed newer scan: %+v", m)
+	}
+	mm, _ = m.scanDone(scanDoneMsg{
+		id: 2, kind: scanLive,
+		rep: app.ScanReport{Fingerprints: map[string]string{"/repo": "new"}},
+	})
+	m = mm.(Model)
+	if m.scanning || m.activeScan != 0 || m.fps["/repo"] != "new" {
+		t.Fatalf("newest completion did not publish: %+v", m)
+	}
+}
+
+func TestWorkPlaqueOpensOnlyFromInspectAndNamesPhase(t *testing.T) {
+	now := time.Now()
+	town := uiTown("keepsake", false, "", now)
+	town.Run = agentrun.Presence{
+		Phase: agentrun.Testing, Active: true, UpdatedAt: now,
+		Objective: "keep local evidence honest",
+		Steps: []agentrun.Step{
+			{At: now, Phase: agentrun.Building, Summary: "joined the guarded scan"},
+			{At: now, Phase: agentrun.Testing, Summary: "ran the race check"},
+		},
+		Paths: []string{"internal/app/app.go"}, Verification: "passed",
+		Failures: []string{"one malformed record"}, Unresolved: []string{"review the silhouette"},
+	}
+	m := uiModel(t, town)
+	m = press(t, m, runes("w"))
+	if m.mode != roam {
+		t.Fatal("work plaque opened straight from the map")
+	}
+	m.mode = inspect
+	if out := m.View(); !strings.Contains(out, "work at the clearing · testing") ||
+		!strings.Contains(out, "w · read the work plaque") {
+		t.Fatalf("inspect lacks the accessible mark and plaque action:\n%s", out)
+	}
+	m = press(t, m, runes("w"))
+	if m.mode != replayView {
+		t.Fatalf("w from inspect did not open plaque: mode=%v", m.mode)
+	}
+	out := m.View()
+	for _, want := range []string{
+		"work plaque · keepsake", "phase · testing", "aim · keep local evidence honest",
+		"building · joined the guarded scan", "verification · passed",
+		"setback · one malformed record", "unresolved · review the silhouette",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("work plaque missing %q:\n%s", want, out)
+		}
+	}
+	m = press(t, m, runes("w"))
+	if m.mode != inspect {
+		t.Fatal("w did not return to inspect")
+	}
+}
+
+func TestStaleWorkPlaqueNeverClaimsActiveWork(t *testing.T) {
+	town := uiTown("keepsake", false, "", time.Now())
+	town.Run = agentrun.Presence{Phase: agentrun.HandedOff, Objective: "leave a trace"}
+	m := uiModel(t, town)
+	m.mode = inspect
+	out := m.View()
+	if strings.Contains(out, "work at the clearing") || !strings.Contains(out, "w · read the work plaque") {
+		t.Fatalf("stale evidence claimed activity or lost its plaque:\n%s", out)
+	}
+	m = press(t, m, runes("w"))
+	if out = m.View(); !strings.Contains(out, "the clearing is quiet now") {
+		t.Fatalf("stale plaque lacks quiet state:\n%s", out)
 	}
 }
 

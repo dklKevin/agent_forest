@@ -39,6 +39,8 @@ The inspect panel names each building's component and stage; the forest itself s
   A town you have stopped tending is slowly, beautifully reclaimed by the forest.
   A commit revives it through smoke, paths, lamplight, and work left out.
   Unfinished local work - a dirty tree, a branch off the default, an extra worktree - pitches a small camp by the hearth, and the camp breaks the moment the work lands or is put away.
+  A fresh in-progress local run can pitch the same camp, while a small shape records planning, building, testing, reviewing, blocked, handed off, or completed without pretending a finished run is still at work.
+  When curated replay evidence exists for a living town, a low plaque stands by the path; its words remain behind inspect.
   Laying it to rest turns it into a monument, with a short epitaph carved if you leave one.
   A long-dead town decays to ruins, but it never disappears.
 - **Numberless by default.**
@@ -52,6 +54,64 @@ The first words of the repository's own README lead the page, followed by the la
 Everything on the page is read from files already sitting in the repository, on your machine.
 Nothing is fetched, asked, or sent anywhere.
 A repository without a readable README still gets a page; it just says there are no guidebook pages yet.
+
+## Local work plaques
+
+AgentForest can show present work without watching processes or contacting a
+service. On each ordinary scan it reads bounded, append-only evidence beneath
+the repository itself. Fresh evidence may pitch a camp and a phase silhouette;
+stale evidence never pretends that work is still happening. A retained plaque
+can still be opened from inspect with `w` to read the curated aim, phase
+summaries, touched relative paths, verification result, setbacks, and unresolved
+questions.
+
+The provider-neutral format is one or more
+`.agentforest/runs/<run-id>/events.jsonl` files. Each complete line is a JSON
+object:
+
+```json
+{"at":"2026-07-25T14:30:00Z","phase":"building","objective":"add a local work plaque","summary":"wired the filesystem reader","paths":["internal/agentrun/agentrun.go"]}
+{"at":"2026-07-25T14:34:00Z","phase":"testing","summary":"ran focused tests","verification":"passed","unresolved":[]}
+```
+
+`phase` is one of `planning`, `building`, `testing`, `reviewing`, `blocked`,
+`handed_off`, or `completed`; `at` must be RFC 3339. All other fields are
+optional. Any local tool can write this format—there is no registration,
+account, SDK, or provider handshake. A compatibility reader also recognizes
+the local `.gnhf/runs` layout, using event kinds and curated iteration summaries
+only; it never reads command or model output into the plaque.
+
+Readers do not follow symlinks, leave partial final lines alone, skip malformed
+records, and consider a phase mark quiet after fifteen minutes without new
+evidence. Evidence is never copied into AgentForest settings or history.
+Removing the local files removes the plaque on the next scan. The two reserved
+evidence trees do not themselves count as a dirty working tree; ordinary
+uncommitted files still pitch the usual camp.
+
+Each evidence root may contain at most 256 entries and 32 evidence-bearing runs;
+a `.gnhf` compatibility run may contain at most 64 entries. A file is capped at
+1 MiB, a complete record at 64 KiB, and descriptor reads are charged against
+separate 32 MiB `.agentforest` and 16 MiB `.gnhf` repository budgets.
+Provider-neutral runs are ordered by their event timestamps. Compatibility runs
+use file timestamps only within `.gnhf`. The roots are strict authority tiers:
+AgentForest scans and validates the complete `.agentforest` tier first. If it
+contains any valid causal observation, only the maximum event timestamp is
+eligible and every observation tied there must carry identical complete,
+privacy-filtered presence; exact duplicates collapse, while a contradiction
+produces no presence. `.gnhf` is not traversed in that case, so compatibility
+overflow, malformed or oversized files, concurrent growth, and other lower-tier
+uncertainty cannot veto causal truth. Foreground change polling uses the same
+authority scope, so ignored compatibility metadata cannot disturb an
+authoritative result.
+
+Compatibility evidence is considered only after `.agentforest` is cleanly
+absent or its bounded scan completes with no valid causal observation. Tied
+`.gnhf` leaders then use the same full-presence consensus rule. Uncertainty in
+the active tier always fails closed: traversal or byte overflow, unreadable or
+unsafe evidence, replacement, identity changes, and growth during a bounded
+descriptor read produce no plaque. In particular, uncertainty in
+`.agentforest` never falls through to `.gnhf`. File timestamps, paths, provider
+order, and run IDs cannot break a tie in either tier.
 
 ## Running it
 
@@ -76,6 +136,7 @@ On a later real launch, towns with commits that landed while you were away may b
 - `enter` or `i` inspect the focused town; numbers live here only.
 - `a` while inspecting opens the town's almanac: its memoir, folded from its history - planted, long quiets and wakings, releases staked, and, leading a finished town's page, its carved words.
 - `b` opens the town's guidebook, from the forest or while inspecting: its own pages, read from local files alone.
+- `w` while inspecting opens a local work plaque when one is present.
 - `f` lay a town to rest as a monument: a short ceremony plays, and you may carve one short line, up to 40 characters (read back in inspect and the almanac, never on the map).
   On a monument, `f` quietly lights the hearth again; the carved words are kept.
 - `d` preview years of neglect in seconds.
@@ -91,6 +152,7 @@ The same forest can be tended from scripts:
 agentforest connect <dir>        connect a root and scan it
 agentforest towns                list every visible town
 agentforest almanac <name|path>  read a town's memoir
+agentforest replay <name|path>   read a town's local work plaque
 agentforest refresh              rescan all connected roots
 agentforest exclude <name|path>  hide a town (history kept)
 agentforest include <name|path>  restore a hidden town
@@ -108,6 +170,7 @@ Every command answers `--help`.
 By default, everything sits in `~/.config/agentforest`; `$XDG_CONFIG_HOME` moves it to `$XDG_CONFIG_HOME/agentforest`, and `$AGENTFOREST_HOME` overrides both.
 The storage is plain files you can read:
 `settings.json` holds your roots, excludes, and last-opened stamp, plus legacy finished entries from older builds; `events.jsonl` is the append-only history the forest grows from, including every finish, unfinish, and carved word.
+Work plaques are not stored there; they are read from the repository-local evidence described above and forgotten when those files disappear.
 Repositories that vanish from disk keep their towns; ruins never disappear.
 
 ## Snapshots and reference sheets
@@ -146,6 +209,9 @@ After an intentional art change, run `make golden` (or `go test ./internal/galle
 
 Everything stays on your machine.
 No telemetry, no analytics, no social features, no leaderboards.
+Local work evidence is read only during foreground scans and explicit replay
+reads: no daemon, process inspection, network dependency, raw prompt capture,
+command capture, or output capture.
 Shareable only because it is beautiful.
 
 ## Status

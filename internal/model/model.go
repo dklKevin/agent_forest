@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dklKevin/agentforest/internal/agentrun"
 	"github.com/dklKevin/agentforest/internal/events"
 	"github.com/dklKevin/agentforest/internal/xnoise"
 )
@@ -189,8 +190,8 @@ func IdleForDecay(d float64) time.Duration {
 // Occupancy is the town's current working state, read live from the
 // repository at scan time. It is presence, not history: never an event,
 // never persisted, never folded into stored state. Each scan derives it
-// fresh, so a camp can only stand while the working tree actually holds
-// unfinished work right now - a stale camp cannot haunt a town.
+// fresh, so its camp signal lasts only while the working tree actually holds
+// unfinished work right now.
 type Occupancy struct {
 	Dirty     bool   // uncommitted changes in the working tree
 	Branch    string // checked-out non-default branch; empty otherwise
@@ -227,6 +228,9 @@ type Town struct {
 	// Occupancy is the working state read at the latest scan: display state
 	// only, rebuilt with the world, never persisted.
 	Occupancy Occupancy
+	// Run is curated local filesystem evidence read at the latest scan. Like
+	// occupancy it is display-only and is never persisted by AgentForest.
+	Run agentrun.Presence
 	// IdleOverride, when set, replaces the real idle time. It exists for the
 	// neglect preview so stages can be seen without waiting real days.
 	IdleOverride *time.Duration

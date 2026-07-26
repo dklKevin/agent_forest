@@ -31,6 +31,7 @@ usage:
   agentforest connect <dir>   connect a root directory and scan it for repositories
   agentforest towns           list every town
   agentforest almanac <name|path>  read a town's memoir: its life, folded from its history
+  agentforest replay <name|path>   read a curated local work plaque
   agentforest refresh         rescan all connected roots
   agentforest exclude <name>  hide a town (history kept); include restores it
   agentforest finish <name> ["word"]   lay a town to rest as a monument; unfinish reverses it

@@ -20,7 +20,6 @@ import (
 	"github.com/dklKevin/agentforest/internal/canvas"
 	"github.com/dklKevin/agentforest/internal/events"
 	"github.com/dklKevin/agentforest/internal/forest"
-	"github.com/dklKevin/agentforest/internal/gitscan"
 	"github.com/dklKevin/agentforest/internal/guidebook"
 	"github.com/dklKevin/agentforest/internal/model"
 )
@@ -34,9 +33,9 @@ const (
 	// invisible.
 	moveFPS = 15
 	idleFPS = 6
-	// pollEvery is how often connected repos are checked for new commits
-	// while the app is open. The check is stat-only (no processes spawned),
-	// so it costs microseconds.
+	// pollEvery is how often connected repos are checked for git or local-run
+	// evidence changes while the app is open. The check reads bounded
+	// filesystem metadata only and does not spawn processes.
 	pollEvery = 2500 * time.Millisecond
 	// reviveDur is how long a town takes to shake off decay and show tended
 	// traces again when a new commit lands.
@@ -66,6 +65,7 @@ const (
 	inspect
 	almanacView   // the town's memoir, one deliberate keypress past inspect
 	guidebookView // the town's own pages, read from its files alone
+	replayView    // a curated local work plaque, one keypress past inspect
 	preview       // the neglect preview: scrub years of decay ahead
 	helpView
 	connectInput
@@ -83,10 +83,12 @@ const (
 	scanStartup scanKind = iota // catching up after launch: silent
 	scanConnect                 // onboarding or the c key
 	scanRefresh                 // the r key
-	scanLive                    // fingerprint poll saw a commit
+	scanLive                    // fingerprint poll saw repository state change
+	scanRetry
 )
 
 type scanDoneMsg struct {
+	id    uint64
 	kind  scanKind
 	rep   app.ScanReport
 	err   error
@@ -161,6 +163,9 @@ type Model struct {
 	inputMsg    string // result line under the input
 	scanning    bool   // one scan at a time; also pauses polling
 	startupScan bool   // Init reconciles once to catch up on closed-time commits
+	scanSeq     uint64 // monotonically identifies scans started by this model
+	activeScan  uint64 // only this completion may publish a polling cursor
+	retryFull   bool
 
 	fps         map[string]string // repo path -> cheap change fingerprint
 	lastPoll    time.Time
@@ -204,6 +209,8 @@ func New(cfg Config) Model {
 	if !cfg.Demo && cfg.App != nil && cfg.App.Connected() {
 		m.startupScan = true
 		m.scanning = true
+		m.scanSeq = 1
+		m.activeScan = 1
 	}
 	return m
 }
@@ -212,7 +219,7 @@ func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{tick(moveFPS)}
 	if m.startupScan {
 		// Catch up on whatever happened while the app was closed.
-		cmds = append(cmds, scanCmd(m.app, scanStartup, "", nil))
+		cmds = append(cmds, scanCmd(m.app, m.activeScan, scanStartup, "", nil))
 	}
 	return tea.Batch(cmds...)
 }
@@ -222,7 +229,7 @@ func tick(fps int) tea.Cmd {
 }
 
 // scanCmd runs the git adapter off the UI thread. Only one runs at a time.
-func scanCmd(a *app.App, kind scanKind, root string, paths []string) tea.Cmd {
+func scanCmd(a *app.App, id uint64, kind scanKind, root string, paths []string) tea.Cmd {
 	return func() tea.Msg {
 		now := time.Now()
 		var rep app.ScanReport
@@ -237,16 +244,31 @@ func scanCmd(a *app.App, kind scanKind, root string, paths []string) tea.Cmd {
 				rep.Changed += r.Changed
 				rep.NewEvents += r.NewEvents
 				rep.OccupancyShift = rep.OccupancyShift || r.OccupancyShift
+				rep.PresenceShift = rep.PresenceShift || r.PresenceShift
+				rep.Retry = rep.Retry || r.Retry
 				rep.Errors = append(rep.Errors, r.Errors...)
+				if rep.Fingerprints == nil {
+					rep.Fingerprints = map[string]string{}
+				}
+				for path, fp := range r.Fingerprints {
+					rep.Fingerprints[path] = fp
+				}
 				if e != nil && err == nil {
 					err = e
 				}
 			}
-		default: // startup and manual refresh reconcile everything
+		default: // startup, retry, and manual refresh reconcile everything
 			rep, err = a.Reconcile(now)
 		}
-		return scanDoneMsg{kind: kind, rep: rep, err: err, root: root, paths: paths}
+		return scanDoneMsg{id: id, kind: kind, rep: rep, err: err, root: root, paths: paths}
 	}
+}
+
+func (m *Model) beginScan(kind scanKind, root string, paths []string) tea.Cmd {
+	m.scanSeq++
+	m.activeScan = m.scanSeq
+	m.scanning = true
+	return scanCmd(m.app, m.activeScan, kind, root, paths)
 }
 
 func (m Model) dotW() float64 { return float64(m.w * 2) }
@@ -415,9 +437,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// maybePoll checks connected repos for new commits with stat calls only, and
-// kicks a rescan when something changed. It stays quiet while another scan
-// runs or while a preview mode holds the world still.
+// maybePoll checks connected repos for git and local-run evidence changes
+// without spawning processes, and kicks a rescan when something changed. It
+// stays quiet while another scan runs or while a preview mode holds the world
+// still.
 func (m *Model) maybePoll() tea.Cmd {
 	if m.demo || m.app == nil || m.scanning ||
 		m.mode == preview || m.mode == connectInput || m.mode == confirmExclude ||
@@ -428,26 +451,28 @@ func (m *Model) maybePoll() tea.Cmd {
 		return nil
 	}
 	m.lastPoll = time.Now()
+	if m.retryFull {
+		return m.beginScan(scanRetry, "", nil)
+	}
 	var changed []string
 	for _, s := range m.world.Sites {
 		path := s.Town.Path
 		if path == "" {
 			continue
 		}
-		fp := gitscan.Fingerprint(path)
+		fp := app.PollFingerprint(path, m.fps[path])
 		if fp == "" {
-			continue // repo gone: it stands, and decays, on its history
+			changed = append(changed, path)
+			continue
 		}
-		if old, ok := m.fps[path]; ok && old != fp {
+		if old, ok := m.fps[path]; !ok || old != fp {
 			changed = append(changed, path)
 		}
-		m.fps[path] = fp
 	}
 	if len(changed) == 0 {
 		return nil
 	}
-	m.scanning = true
-	return scanCmd(m.app, scanLive, "", changed)
+	return m.beginScan(scanLive, "", changed)
 }
 
 // stepRevives eases reviving towns, and reviving buildings, from their old
@@ -498,7 +523,32 @@ func (m *Model) stepRevives() {
 }
 
 func (m Model) scanDone(msg scanDoneMsg) (tea.Model, tea.Cmd) {
+	if msg.id != 0 && msg.id != m.activeScan {
+		// Bubble Tea normally serializes scans, but a delayed command result
+		// must never clear a newer in-flight scan or publish its stale cursor.
+		return m, nil
+	}
+	if msg.id != 0 {
+		m.activeScan = 0
+	}
 	m.scanning = false
+	// A persistence failure publishes no positive event, occupancy, or run
+	// state. Fail-closed run disappearance may still clear stale public state.
+	// Never publish its polling cursor: keeping the old fingerprint makes the
+	// next poll retry the exact filesystem state that failed.
+	if msg.err == nil {
+		for path, fp := range msg.rep.Fingerprints {
+			m.fps[path] = fp
+		}
+	}
+	if msg.err != nil || len(msg.rep.Errors) > 0 || msg.rep.Retry {
+		m.retryFull = true
+	} else if msg.kind == scanStartup || msg.kind == scanRetry {
+		m.retryFull = false
+	}
+	if msg.err != nil && msg.rep.PresenceShift && m.app != nil {
+		m.rebuildWorld()
+	}
 	if msg.kind == scanConnect {
 		return m.connectDone(msg)
 	}
@@ -509,7 +559,7 @@ func (m Model) scanDone(msg scanDoneMsg) (tea.Model, tea.Cmd) {
 		// closed, so the pulse runs even when this scan found nothing new
 		// itself - and even when the scan failed, the log on disk still
 		// tells the story.
-		if msg.err == nil && (msg.rep.NewEvents > 0 || msg.rep.OccupancyShift) {
+		if msg.err == nil && (msg.rep.NewEvents > 0 || msg.rep.OccupancyShift || msg.rep.PresenceShift) {
 			m.rebuildWorld()
 		}
 		m.beginPulse()
@@ -570,9 +620,9 @@ func (m Model) scanDone(msg scanDoneMsg) (tea.Model, tea.Cmd) {
 		case msg.kind == scanRefresh:
 			m.toast(fmt.Sprintf("refreshed · %d towns grew", msg.rep.Changed))
 		}
-	} else if msg.rep.OccupancyShift {
-		// No history landed, but a camp pitched or broke: rebuild so the
-		// mark tracks the working tree. Camps are quiet; no toast.
+	} else if msg.rep.OccupancyShift || msg.rep.PresenceShift {
+		// No history landed, but a camp, phase mark, or plaque changed:
+		// rebuild from the one atomically published scan view. Quietly.
 		m.rebuildWorld()
 		if msg.kind == scanRefresh {
 			m.toast("refreshed · nothing new")
@@ -780,6 +830,14 @@ func (m Model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.book, m.bookFor = guidebook.Read(m.focus.Town.Path), bookKey(m.focus.Town)
 			m.mode = guidebookView
 		}
+	case "w":
+		// A work plaque is one deliberate step beyond inspect. It exposes
+		// only the curated local evidence already represented by the mark.
+		if m.mode == replayView {
+			m.mode = inspect
+		} else if m.mode == inspect && m.focus != nil && m.focus.Town.Run.Available() {
+			m.mode = replayView
+		}
 	case "d":
 		if m.mode == preview {
 			m.mode = roam
@@ -800,9 +858,8 @@ func (m Model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "r":
 		if !m.demo && m.app != nil && !m.scanning && len(m.app.Settings.Roots) > 0 {
-			m.scanning = true
 			m.toast("walking the roots …")
-			return m, scanCmd(m.app, scanRefresh, "", nil)
+			return m, m.beginScan(scanRefresh, "", nil)
 		}
 	case "?":
 		if m.mode == helpView {
@@ -844,9 +901,8 @@ func (m Model) connectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				path = home + strings.TrimPrefix(path, "~")
 			}
 		}
-		m.scanning = true
 		m.inputMsg = ""
-		return m, scanCmd(m.app, scanConnect, path, nil)
+		return m, m.beginScan(scanConnect, path, nil)
 	case "backspace":
 		if r := []rune(m.input); len(r) > 0 {
 			m.input = string(r[:len(r)-1])
@@ -1117,6 +1173,8 @@ func (m Model) View() string {
 		m.drawAlmanac()
 	case guidebookView:
 		m.drawGuidebook()
+	case replayView:
+		m.drawReplay()
 	case preview:
 		m.drawPreview()
 	case helpView:
@@ -1232,6 +1290,16 @@ func (m Model) drawInspect() {
 	// The camp: one quiet line while the working tree holds unfinished work.
 	if !t.Finished && t.Occupancy.Occupied() {
 		lines = append(lines, line{t.Occupancy.Line(), 150, 0})
+	}
+	if t.Run.Available() {
+		if t.Run.ActiveAt(m.now) && !t.Finished {
+			prefix := "recent work mark · "
+			if t.Run.Phase.InProgress() {
+				prefix = "work at the clearing · "
+			}
+			lines = append(lines, line{prefix + t.Run.Phase.String(), 165, 60})
+		}
+		lines = append(lines, line{"w · read the work plaque", 135, 0})
 	}
 	// The carved epitaph: the user's own words, read only here. The map
 	// stays silent; the monument just stands.
@@ -1566,6 +1634,69 @@ func (m Model) drawFinishConfirm() {
 	m.panel(lines)
 }
 
+// drawReplay opens the work plaque. The map carries only silhouettes; this
+// deliberate view is the accessible text alternative and the bounded causal
+// replay: intent, curated turns, touched paths, verification, failures, and
+// unresolved questions. It never shows prompts, commands, output, or provider
+// identity.
+func (m Model) drawReplay() {
+	if m.focus == nil {
+		return
+	}
+	t := m.focus.Town
+	p := t.Run
+	lines := []line{{"work plaque · " + t.Name, 230, 235}, {"", 0, 0}}
+	if !p.Available() {
+		lines = append(lines,
+			line{"no local work evidence remains", 150, 0},
+			line{"", 0, 0},
+			line{"w back to inspect", 115, 0},
+		)
+		m.panel(lines)
+		return
+	}
+	phase := "phase · " + p.Phase.String()
+	if !p.ActiveAt(m.now) {
+		phase += " · the clearing is quiet now"
+	}
+	lines = append(lines, line{phase, 175, 60})
+	if p.Objective != "" {
+		lines = append(lines, line{"aim · " + p.Objective, 165, 0})
+	}
+	steps := p.Steps
+	if len(steps) > 4 {
+		steps = steps[len(steps)-4:]
+	}
+	for _, step := range steps {
+		lines = append(lines, line{step.Phase.String() + " · " + step.Summary, 150, 0})
+	}
+	if len(p.Paths) > 0 {
+		paths := p.Paths
+		if len(paths) > 3 {
+			paths = paths[:3]
+		}
+		lines = append(lines, line{"touched · " + strings.Join(paths, " · "), 140, 0})
+	}
+	if p.Verification != "" {
+		lines = append(lines, line{"verification · " + p.Verification, 160, 0})
+	}
+	for _, failure := range firstStrings(p.Failures, 2) {
+		lines = append(lines, line{"setback · " + failure, 150, 0})
+	}
+	for _, question := range firstStrings(p.Unresolved, 2) {
+		lines = append(lines, line{"unresolved · " + question, 150, 0})
+	}
+	lines = append(lines, line{"", 0, 0}, line{"w back to inspect", 115, 0})
+	m.panel(lines)
+}
+
+func firstStrings(items []string, n int) []string {
+	if len(items) <= n {
+		return items
+	}
+	return items[:n]
+}
+
 func (m Model) drawHelp() {
 	lines := []line{
 		{"agentforest", 230, 235},
@@ -1575,6 +1706,7 @@ func (m Model) drawHelp() {
 		{"inspect    enter or i · numbers live here only", 150, 0},
 		{"almanac    a while inspecting · the town's memoir", 150, 0},
 		{"guidebook  b · the town's own pages, read from its files", 150, 0},
+		{"work plaque w while inspecting · local evidence only", 150, 0},
 		{"finished   f · lay a town to rest as a monument", 150, 0},
 		{"foresee    d · preview the years of neglect", 150, 0},
 		{"connect    c · add a root full of repositories", 150, 0},

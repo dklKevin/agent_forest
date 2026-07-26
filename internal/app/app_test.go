@@ -43,6 +43,20 @@ func mkRepo(t *testing.T, dir string, ts time.Time, file, content string) {
 	commitAt(t, dir, ts, file, content)
 }
 
+func writeRunEvidence(t *testing.T, repo string, at time.Time, phase, summary string) string {
+	t.Helper()
+	path := filepath.Join(repo, ".agentforest", "runs", "local", "events.jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line := fmt.Sprintf("{\"at\":%q,\"phase\":%q,\"summary\":%q}\n",
+		at.Format(time.RFC3339Nano), phase, summary)
+	if err := os.WriteFile(path, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestConnectPersistExcludeRelaunch(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("AGENTFOREST_HOME", home)
@@ -390,6 +404,59 @@ func TestScanReadsAndClearsOccupancy(t *testing.T) {
 	}
 }
 
+func TestScanReadsClearsAndForgetsRunPresence(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENTFOREST_HOME", home)
+	root := t.TempDir()
+	repo := filepath.Join(root, "busy")
+	mkRepo(t, repo, time.Now().Add(-48*time.Hour), "main.go", "package main")
+
+	a, _ := Load()
+	if _, err := a.ConnectRoot(root, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	before := len(a.EventsSnapshot())
+	path := writeRunEvidence(t, repo, time.Now().Add(-time.Minute), "testing", "checked the boundary")
+	key, _ := a.FindTown("busy")
+	rep, err := a.RescanRepo(key, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.PresenceShift || rep.NewEvents != 0 {
+		t.Fatalf("run-only scan report = %+v", rep)
+	}
+	run := a.Towns()[0].Run
+	if !run.Active || run.Phase.String() != "testing" || len(run.Steps) != 1 {
+		t.Fatalf("run not attached: %+v", run)
+	}
+	if len(a.EventsSnapshot()) != before {
+		t.Fatal("run evidence leaked into the forest event log")
+	}
+
+	// Relaunching from AgentForest storage alone cannot resurrect presence.
+	b, _ := Load()
+	if b.Towns()[0].Run.Available() {
+		t.Fatalf("run persisted across relaunch: %+v", b.Towns()[0].Run)
+	}
+	if _, err := b.Reconcile(time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if !b.Towns()[0].Run.Available() {
+		t.Fatal("foreground reconcile did not re-read local evidence")
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	rep, err = b.RescanRepo(key, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.PresenceShift || b.Towns()[0].Run.Available() {
+		t.Fatalf("removed evidence left a plaque: report=%+v run=%+v", rep, b.Towns()[0].Run)
+	}
+}
+
 func TestReconcilePersistenceFailurePublishesNoState(t *testing.T) {
 	t.Setenv("AGENTFOREST_HOME", t.TempDir())
 	root := t.TempDir()
@@ -411,6 +478,7 @@ func TestReconcilePersistenceFailurePublishesNoState(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(keep, "main.go"), []byte("package main // working"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	writeRunEvidence(t, keep, time.Now(), "building", "must not publish")
 	blocked := filepath.Join(t.TempDir(), "not-a-directory")
 	if err := os.WriteFile(blocked, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
@@ -433,11 +501,256 @@ func TestReconcilePersistenceFailurePublishesNoState(t *testing.T) {
 			if town.Occupancy.Occupied() {
 				t.Fatalf("published new occupancy after persistence failure: %+v", town.Occupancy)
 			}
+			if town.Run.Available() {
+				t.Fatalf("published run evidence after persistence failure: %+v", town.Run)
+			}
 		case "gone":
 			if town.Occupancy.Branch != "wip" {
 				t.Fatalf("pruned occupancy after persistence failure: %+v", town.Occupancy)
 			}
 		}
+	}
+}
+
+func TestRepoScanErrorPreservesCursorAndVolatileState(t *testing.T) {
+	t.Setenv("AGENTFOREST_HOME", t.TempDir())
+	root := t.TempDir()
+	repo := filepath.Join(root, "keep")
+	mkRepo(t, repo, time.Now().Add(-time.Hour), "main.go", "package main")
+
+	a, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.ConnectRoot(root, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	before := a.Towns()[0]
+
+	gitIn(t, repo, nil, "checkout", "-q", "-b", "wip")
+	writeRunEvidence(t, repo, time.Now(), "building", "must not publish")
+	ref := filepath.Join(repo, ".git", "refs", "heads", "wip")
+	if err := os.WriteFile(ref, []byte(strings.Repeat("0", 40)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if fp := PollFingerprint(repo); fp == "" {
+		t.Fatal("test setup produced no polling fingerprint")
+	}
+
+	rep, err := a.RescanRepo(repo, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Errors) != 1 {
+		t.Fatalf("scan errors = %v", rep.Errors)
+	}
+	if _, ok := rep.Fingerprints[repo]; ok {
+		t.Fatal("errored repository published its polling cursor")
+	}
+	after := a.Towns()[0]
+	if after.Occupancy != before.Occupancy || after.Run.Available() {
+		t.Fatalf("errored repository published volatile state: before=%+v after=%+v", before, after)
+	}
+}
+
+func TestFailedGitScanClearsRemovedPriorActivePresenceWithoutAdvancingCursor(t *testing.T) {
+	t.Setenv("AGENTFOREST_HOME", t.TempDir())
+	root := t.TempDir()
+	repo := filepath.Join(root, "keep")
+	now := time.Now().UTC()
+	mkRepo(t, repo, now.Add(-time.Hour), "main.go", "package main")
+	evidence := writeRunEvidence(t, repo, now.Add(-time.Minute), "building", "must clear")
+
+	a, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := a.ConnectRoot(root, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !a.Towns()[0].Run.ActiveAt(now) {
+		t.Fatalf("test setup did not publish active presence: %+v", a.Towns()[0].Run)
+	}
+	key := a.Towns()[0].Path
+	if initial.Fingerprints[key] == "" {
+		t.Fatal("test setup did not publish an initial polling cursor")
+	}
+
+	if err := os.Remove(evidence); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, repo, nil, "checkout", "-q", "-b", "wip")
+	ref := filepath.Join(repo, ".git", "refs", "heads", "wip")
+	if err := os.WriteFile(ref, []byte(strings.Repeat("0", 40)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := a.RescanRepo(key, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Errors) != 1 {
+		t.Fatalf("scan errors = %v", rep.Errors)
+	}
+	if _, ok := rep.Fingerprints[key]; ok {
+		t.Fatal("failed git scan advanced the polling cursor")
+	}
+	if !rep.PresenceShift || a.Towns()[0].Run.Available() {
+		t.Fatalf("failed git scan retained removed active presence: report=%+v run=%+v",
+			rep, a.Towns()[0].Run)
+	}
+}
+
+func TestUncertainRunReadClearsPresenceWithoutCursorAndRequestsRetry(t *testing.T) {
+	t.Setenv("AGENTFOREST_HOME", t.TempDir())
+	root := t.TempDir()
+	repo := filepath.Join(root, "keep")
+	now := time.Now().UTC()
+	mkRepo(t, repo, now.Add(-time.Hour), "main.go", "package main")
+	evidence := writeRunEvidence(t, repo, now.Add(-time.Minute), "building", "must clear")
+
+	a, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := a.ConnectRoot(root, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := a.Towns()[0].Path
+	if initial.Fingerprints[key] == "" || !a.Towns()[0].Run.Available() {
+		t.Fatal("test setup did not publish initial presence and cursor")
+	}
+	if err := os.Remove(evidence); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(evidence, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := a.RescanRepo(key, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.Retry || !rep.PresenceShift || a.Towns()[0].Run.Available() {
+		t.Fatalf("uncertain evidence did not fail closed with retry: report=%+v run=%+v",
+			rep, a.Towns()[0].Run)
+	}
+	if _, ok := rep.Fingerprints[key]; ok {
+		t.Fatal("uncertain evidence published a polling cursor")
+	}
+}
+
+func TestPollFingerprintChangesAfterSettledAtomicEvidenceReplacementBeforeRead(t *testing.T) {
+	t.Setenv("AGENTFOREST_HOME", t.TempDir())
+	root := t.TempDir()
+	repo := filepath.Join(root, "keep")
+	now := time.Now().UTC()
+	mkRepo(t, repo, now.Add(-time.Hour), "main.go", "package main")
+	path := writeRunEvidence(t, repo, now.Add(-time.Minute), "planning", "OLD_SECRET")
+
+	a, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, err := a.ConnectRoot(root, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := a.Towns()[0].Path
+	cursor := rep.Fingerprints[key]
+	if cursor == "" || a.Towns()[0].Run.Phase.String() != "planning" {
+		t.Fatalf("test setup did not publish planning cursor: cursor=%q run=%+v",
+			cursor, a.Towns()[0].Run)
+	}
+	before, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runBefore, err := os.Lstat(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := filepath.Join(filepath.Dir(path), "events.next")
+	line := fmt.Sprintf("{\"at\":%q,\"phase\":%q,\"summary\":%q}\n",
+		now.Add(-time.Minute).Format(time.RFC3339Nano), "building", "NEW_SECRET")
+	if int64(len(line)) != before.Size() {
+		t.Fatalf("replacement size = %d, want %d", len(line), before.Size())
+	}
+	if err := os.WriteFile(replacement, []byte(line), before.Mode()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(replacement, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filepath.Dir(path), runBefore.ModTime(), runBefore.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runAfter, err := os.Lstat(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(before, after) || before.Size() != after.Size() ||
+		!before.ModTime().Equal(after.ModTime()) || before.Mode() != after.Mode() {
+		t.Fatalf("test setup was not an identity-only settled replacement: before=%+v after=%+v",
+			before, after)
+	}
+	if !os.SameFile(runBefore, runAfter) || runBefore.Size() != runAfter.Size() ||
+		!runBefore.ModTime().Equal(runAfter.ModTime()) || runBefore.Mode() != runAfter.Mode() {
+		t.Fatalf("run directory metadata changed across replacement: before=%+v after=%+v",
+			runBefore, runAfter)
+	}
+
+	if got := PollFingerprint(key, cursor); got == cursor {
+		t.Fatalf("settled identity-only replacement aliased production polling cursor %q", cursor)
+	}
+	if a.Towns()[0].Run.Phase.String() != "planning" {
+		t.Fatal("polling fingerprint unexpectedly performed a run evidence Read")
+	}
+}
+
+func TestFirstScanPublishesAuthoritativeFingerprintScope(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "busy")
+	now := time.Now().UTC()
+	mkRepo(t, repo, now.Add(-time.Hour), "main.go", "package main")
+	writeRunEvidence(t, repo, now.Add(-time.Minute), "testing", "authoritative")
+	compatibility := filepath.Join(repo, ".gnhf", "runs", "compatibility", "iteration-1.jsonl")
+	if err := os.MkdirAll(filepath.Dir(compatibility), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(compatibility, []byte("{\"type\":\"item.started\"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := &App{Dir: t.TempDir(), Settings: &store.Settings{}}
+	rep, err := a.RescanRepo(repo, now)
+	if err != nil || len(rep.Errors) != 0 {
+		t.Fatalf("first scan failed: report=%+v err=%v", rep, err)
+	}
+	cursor := rep.Fingerprints[repo]
+	if !strings.Contains(cursor, ":a:") {
+		t.Fatalf("first scan did not publish authoritative scope: %q", cursor)
+	}
+	f, err := os.OpenFile(compatibility, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("{\"type\":\"turn.completed\"}\n"); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := PollFingerprint(repo, cursor); got != cursor {
+		t.Fatal("compatibility metadata changed first authoritative cursor")
 	}
 }
 
@@ -479,6 +792,7 @@ func TestReconcilePrunesVanishedOccupancy(t *testing.T) {
 	repo := filepath.Join(root, "gone")
 	mkRepo(t, repo, time.Now().Add(-48*time.Hour), "main.go", "package main")
 	gitIn(t, repo, nil, "checkout", "-q", "-b", "wip")
+	writeRunEvidence(t, repo, time.Now(), "planning", "one local turn")
 
 	a, _ := Load()
 	if _, err := a.ConnectRoot(root, time.Now()); err != nil {
@@ -486,6 +800,9 @@ func TestReconcilePrunesVanishedOccupancy(t *testing.T) {
 	}
 	if a.Towns()[0].Occupancy.Branch != "wip" {
 		t.Fatalf("occupancy not read: %+v", a.Towns()[0].Occupancy)
+	}
+	if !a.Towns()[0].Run.Available() {
+		t.Fatal("run evidence not read before prune")
 	}
 	if err := os.RemoveAll(repo); err != nil {
 		t.Fatal(err)
@@ -497,7 +814,13 @@ func TestReconcilePrunesVanishedOccupancy(t *testing.T) {
 	if !rep.OccupancyShift {
 		t.Fatalf("pruned camp not reported: %+v", rep)
 	}
+	if !rep.PresenceShift {
+		t.Fatalf("pruned plaque not reported: %+v", rep)
+	}
 	if a.Towns()[0].Occupancy.Occupied() {
 		t.Fatalf("camp outlived its repo: %+v", a.Towns()[0].Occupancy)
+	}
+	if a.Towns()[0].Run.Available() {
+		t.Fatalf("plaque outlived its repo: %+v", a.Towns()[0].Run)
 	}
 }

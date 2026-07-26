@@ -188,3 +188,64 @@ func TestCmdAlmanacUsage(t *testing.T) {
 		t.Fatalf("--help must answer, exit %d:\n%s", code, out)
 	}
 }
+
+func TestCmdReplayReadsLocalPlaqueWithoutPersistingIt(t *testing.T) {
+	t.Setenv("AGENTFOREST_HOME", t.TempDir())
+	root := t.TempDir()
+	repo := filepath.Join(root, "active-app")
+	mkCLIRepo(t, repo, time.Now().Add(-time.Hour), "main.go", "package main\n")
+	if out, code := capture(t, func() int { return runCommand("connect", []string{root}) }); code != 0 {
+		t.Fatalf("connect exit = %d\n%s", code, out)
+	}
+	path := filepath.Join(repo, ".agentforest", "runs", "one", "events.jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line := fmt.Sprintf(
+		"{\"at\":%q,\"phase\":\"reviewing\",\"objective\":\"keep it local\",\"summary\":\"checked the plaque\",\"paths\":[\"cli.go\"],\"verification\":\"passed\",\"unresolved\":[\"visual review\"]}\n",
+		time.Now().UTC().Format(time.RFC3339Nano))
+	if err := os.WriteFile(path, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	home, _ := store.Dir()
+	before, _, err := store.LoadEvents(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, code := capture(t, func() int { return cmdReplay([]string{"active-app"}) })
+	if code != 0 {
+		t.Fatalf("replay exit = %d\n%s", code, out)
+	}
+	for _, want := range []string{
+		"work plaque: active-app", "phase: reviewing", "aim: keep it local",
+		"reviewing: checked the plaque", "touched: cli.go", "verification: passed",
+		"unresolved: visual review", "did not add it to the forest log",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("replay output missing %q:\n%s", want, out)
+		}
+	}
+	after, _, err := store.LoadEvents(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatal("replay persisted local evidence")
+	}
+}
+
+func TestCmdReplayMissingAndUsageAreQuietAndHelpful(t *testing.T) {
+	almanacHome(t)
+	out, code := capture(t, func() int { return cmdReplay([]string{"mothgate"}) })
+	if code != 0 || !strings.Contains(out, "no local work evidence") {
+		t.Fatalf("missing replay exit=%d:\n%s", code, out)
+	}
+	if out, code = capture(t, func() int { return cmdReplay(nil) }); code != 2 ||
+		!strings.Contains(out, "agentforest replay <name|path>") {
+		t.Fatalf("replay usage exit=%d:\n%s", code, out)
+	}
+	if out, code = capture(t, func() int { return runCommand("replay", []string{"--help"}) }); code != 0 ||
+		!strings.Contains(out, "bounded, curated replay") {
+		t.Fatalf("replay help exit=%d:\n%s", code, out)
+	}
+}

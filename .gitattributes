@@ -1,0 +1,2 @@
+# Render goldens are exact fixed-width terminal frames; right padding is data.
+*.golden -whitespace
