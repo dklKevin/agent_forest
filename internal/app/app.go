@@ -411,6 +411,9 @@ func (a *App) scan(repos []string, now time.Time, pruneMissing bool) (ScanReport
 	return rep, nil
 }
 
+// PollFingerprint returns the current git and local-run metadata cursor. A
+// previous authoritative cursor keeps lower-tier compatibility metadata out of
+// subsequent polls.
 func PollFingerprint(repo string, previous ...string) string {
 	scope := agentrun.FingerprintCompatibility
 	if len(previous) > 0 {

@@ -100,7 +100,9 @@ eligible and every observation tied there must carry identical complete,
 privacy-filtered presence; exact duplicates collapse, while a contradiction
 produces no presence. `.gnhf` is not traversed in that case, so compatibility
 overflow, malformed or oversized files, concurrent growth, and other lower-tier
-uncertainty cannot veto causal truth.
+uncertainty cannot veto causal truth. Foreground change polling uses the same
+authority scope, so ignored compatibility metadata cannot disturb an
+authoritative result.
 
 Compatibility evidence is considered only after `.agentforest` is cleanly
 absent or its bounded scan completes with no valid causal observation. Tied

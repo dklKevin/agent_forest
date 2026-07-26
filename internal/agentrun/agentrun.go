@@ -116,6 +116,8 @@ type runDir struct {
 	at   time.Time
 }
 
+// FingerprintScope identifies the evidence tier whose metadata can affect a
+// result returned by ReadWithScope.
 type FingerprintScope uint8
 
 const (
@@ -123,11 +125,15 @@ const (
 	FingerprintCompatibility
 )
 
+// Fingerprints holds metadata-only polling digests for both possible evidence
+// scopes from one filesystem walk.
 type Fingerprints struct {
 	authoritative string
 	compatibility string
 }
 
+// For returns the polling digest for scope, prefixed so the next poll can
+// preserve the selected authority tier.
 func (f Fingerprints) For(scope FingerprintScope) string {
 	if scope == FingerprintAuthoritative {
 		return "a:" + f.authoritative
@@ -188,6 +194,8 @@ func readWithBudgets(repo string, now time.Time, openLimit, gnhfLimit int64) Pre
 	return p
 }
 
+// ReadWithScope returns the selected presence and the evidence scope that may
+// invalidate it during foreground polling.
 func ReadWithScope(repo string, now time.Time) (Presence, FingerprintScope) {
 	return readWithScope(repo, now, maxOpenBytes, maxGNHFBytes)
 }
@@ -888,8 +896,9 @@ func cleanRelativePath(path string) (string, bool) {
 	return cleanText(filepath.ToSlash(clean)), true
 }
 
-// Fingerprint returns a cheap metadata-only digest of the supported local
-// evidence roots. It follows no symlinks and reads no evidence content.
+// Fingerprint returns cheap metadata-only digests for both authority scopes.
+// It follows no symlinks, reads no evidence content, and does not traverse the
+// compatibility tier when authoritative metadata is unsafe.
 func Fingerprint(repo string) Fingerprints {
 	var authoritative bytes.Buffer
 	stable := fingerprintTier(&authoritative, repo, ".agentforest")
@@ -906,6 +915,8 @@ func Fingerprint(repo string) Fingerprints {
 	}
 }
 
+// FingerprintFor recomputes the metadata-only polling digest for an explicit
+// authority scope.
 func FingerprintFor(repo string, scope FingerprintScope) string {
 	var data bytes.Buffer
 	stable := fingerprintTier(&data, repo, ".agentforest")
