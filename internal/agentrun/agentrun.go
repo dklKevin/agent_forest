@@ -1021,25 +1021,27 @@ func cleanText(s string) string {
 }
 
 func cleanRelativePath(path string) (string, bool) {
-	if path == "" || !utf8.ValidString(path) {
+	if !utf8.ValidString(path) {
 		return "", false
 	}
-	portable := strings.ReplaceAll(path, "\\", "/")
-	if strings.HasPrefix(portable, "/") ||
-		(len(portable) >= 2 &&
-			((portable[0] >= 'a' && portable[0] <= 'z') ||
-				(portable[0] >= 'A' && portable[0] <= 'Z')) &&
-			portable[1] == ':') {
+	path = strings.TrimSpace(path)
+	if path == "" {
 		return "", false
 	}
-	clean := pathpkg.Clean(portable)
-	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
-		return "", false
-	}
-	for _, r := range clean {
-		if unicode.IsControl(r) {
+	for _, r := range path {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 			return "", false
 		}
+	}
+	clean := pathpkg.Clean(strings.ReplaceAll(path, "\\", "/"))
+	clean = pathpkg.Clean(strings.TrimSpace(clean))
+	if clean == "" || clean == "." || strings.HasPrefix(clean, "/") ||
+		clean == ".." || strings.HasPrefix(clean, "../") ||
+		(len(clean) >= 2 &&
+			((clean[0] >= 'a' && clean[0] <= 'z') ||
+				(clean[0] >= 'A' && clean[0] <= 'Z')) &&
+			clean[1] == ':') {
+		return "", false
 	}
 	clean = cleanText(clean)
 	return clean, clean != ""

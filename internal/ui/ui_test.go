@@ -555,6 +555,92 @@ func TestEmptyPollFingerprintFailsClosedAndKeepsRetrying(t *testing.T) {
 	}
 }
 
+func TestVanishedRepositoryPollsOnceAndRestorationIsDetected(t *testing.T) {
+	t.Setenv("AGENTFOREST_HOME", t.TempDir())
+	root := t.TempDir()
+	repo := filepath.Join(root, "busy")
+	mkUIRepo(t, repo)
+	evidence := filepath.Join(repo, ".agentforest", "runs", "one", "events.jsonl")
+	if err := os.MkdirAll(filepath.Dir(evidence), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line := `{"at":"` + time.Now().UTC().Format(time.RFC3339Nano) + `","phase":"building"}` + "\n"
+	if err := os.WriteFile(evidence, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a, err := app.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := a.ConnectRoot(root, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := a.Towns()[0].Path
+	baseline := initial.Fingerprints[key]
+	m := persistedUIModel(t, a.Towns()[0], a)
+	mm, _ := m.scanDone(scanDoneMsg{
+		id: m.activeScan, kind: scanStartup, rep: initial,
+	})
+	m = mm.(Model)
+
+	if err := os.RemoveAll(repo); err != nil {
+		t.Fatal(err)
+	}
+	absent := app.PollFingerprint(key, baseline)
+	if absent == "" || absent == baseline {
+		t.Fatalf("confirmed absence fingerprint = %q, baseline %q", absent, baseline)
+	}
+	m.lastPoll = time.Now().Add(-pollEvery)
+	cmd := m.maybePoll()
+	if cmd == nil {
+		t.Fatal("repository disappearance was not scanned")
+	}
+	disappeared := cmd().(scanDoneMsg)
+	if disappeared.rep.Retry || len(disappeared.rep.Errors) != 0 ||
+		!disappeared.rep.PresenceShift || disappeared.rep.Fingerprints[key] != absent {
+		t.Fatalf("stable disappearance did not publish one negative state: %+v", disappeared)
+	}
+	mm, _ = m.scanDone(disappeared)
+	m = mm.(Model)
+	if m.retryFull || m.fps[key] != absent ||
+		len(m.world.Sites) != 1 || m.world.Sites[0].Town.Run.Available() {
+		t.Fatalf("stable absence state was not retained: retry=%v cursor=%q",
+			m.retryFull, m.fps[key])
+	}
+	m.lastPoll = time.Now().Add(-pollEvery)
+	if cmd := m.maybePoll(); cmd != nil {
+		t.Fatal("stable repository absence caused repeated polling")
+	}
+
+	mkUIRepo(t, repo)
+	restored := app.PollFingerprint(key, absent)
+	if restored == "" || restored == absent {
+		t.Fatalf("restored repository fingerprint = %q, absent %q", restored, absent)
+	}
+	m.lastPoll = time.Now().Add(-pollEvery)
+	cmd = m.maybePoll()
+	if cmd == nil {
+		t.Fatal("repository restoration was not detected")
+	}
+	restoredMsg := cmd().(scanDoneMsg)
+	if restoredMsg.err != nil || restoredMsg.rep.Retry ||
+		restoredMsg.rep.Fingerprints[key] != restored {
+		t.Fatalf("restored repository scan = %+v", restoredMsg)
+	}
+	mm, _ = m.scanDone(restoredMsg)
+	m = mm.(Model)
+	if m.retryFull || m.fps[key] != restored {
+		t.Fatalf("restoration cursor was not published: retry=%v cursor=%q",
+			m.retryFull, m.fps[key])
+	}
+	m.lastPoll = time.Now().Add(-pollEvery)
+	if cmd := m.maybePoll(); cmd != nil {
+		t.Fatal("restoration caused a duplicate unchanged scan")
+	}
+}
+
 func TestStaleScanCompletionCannotOverwriteNewerSuccess(t *testing.T) {
 	m := Model{
 		fps:      map[string]string{"/repo": "old"},

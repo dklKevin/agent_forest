@@ -21,6 +21,8 @@ import (
 	"github.com/dklKevin/agentforest/internal/store"
 )
 
+const absentPollFingerprint = "absent"
+
 // App is the loaded persistent state of one forest.
 type App struct {
 	Dir         string
@@ -329,6 +331,10 @@ func (a *App) scan(repos []string, now time.Time, pruneMissing bool) (ScanReport
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			if repositoryAbsent(repo) {
+				results[i] = result{repo: repo, fp: absentPollFingerprint}
+				return
+			}
 			gitFP := gitscan.Fingerprint(repo)
 			runFP := agentrun.Fingerprint(repo)
 			evs, err := gitscan.Scan(repo, known[repo], now)
@@ -443,6 +449,9 @@ func (a *App) scan(repos []string, now time.Time, pruneMissing bool) (ScanReport
 // previous authoritative cursor keeps lower-tier compatibility metadata out of
 // subsequent polls.
 func PollFingerprint(repo string, previous ...string) string {
+	if repositoryAbsent(repo) {
+		return absentPollFingerprint
+	}
 	scope := agentrun.FingerprintCompatibility
 	if len(previous) > 0 {
 		parts := strings.Split(previous[0], ":")
@@ -451,6 +460,11 @@ func PollFingerprint(repo string, previous ...string) string {
 		}
 	}
 	return pollFingerprint(gitscan.Fingerprint(repo), agentrun.FingerprintFor(repo, scope))
+}
+
+func repositoryAbsent(path string) bool {
+	_, err := os.Lstat(path)
+	return os.IsNotExist(err)
 }
 
 func pollFingerprint(gitFP, runFP string) string {

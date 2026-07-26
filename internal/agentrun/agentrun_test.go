@@ -60,27 +60,30 @@ func TestOpenFormatBuildsBoundedCuratedReplay(t *testing.T) {
 }
 
 func TestOpenFormatRejectsForeignAndTraversalPathsPortably(t *testing.T) {
-	tests := map[string]bool{
-		`internal/agentrun/read.go`: true,
-		`internal\agentrun\read.go`: true,
-		`C:\Users\name\file.go`:     false,
-		`C:/Users/name/file.go`:     false,
-		`C:file.go`:                 false,
-		`\\server\share\file.go`:    false,
-		`//server/share/file.go`:    false,
-		`\rooted\file.go`:           false,
-		`../secret`:                 false,
-		`..\secret`:                 false,
-		`safe\..\..\secret`:         false,
+	tests := map[string]string{
+		`internal/agentrun/read.go`:   `internal/agentrun/read.go`,
+		`internal\agentrun\read.go`:   `internal/agentrun/read.go`,
+		` internal\agentrun\read.go `: `internal/agentrun/read.go`,
+		`C:\Users\name\file.go`:       "",
+		`C:/Users/name/file.go`:       "",
+		`C:file.go`:                   "",
+		`./C:\Users\name\file.go`:     "",
+		`./ C:\Users\name\file.go`:    "",
+		`\\server\share\file.go`:      "",
+		`//server/share/file.go`:      "",
+		` \\server\share\file.go`:     "",
+		`\rooted\file.go`:             "",
+		`../secret`:                   "",
+		` ../secret`:                  "",
+		`..\secret`:                   "",
+		`./ ..\secret`:                "",
+		`safe\..\..\secret`:           "",
 	}
-	for input, wantOK := range tests {
+	for input, want := range tests {
 		got, ok := cleanRelativePath(input)
-		if ok != wantOK {
-			t.Fatalf("cleanRelativePath(%q) = %q, %v; want accepted=%v",
-				input, got, ok, wantOK)
-		}
-		if ok && strings.Contains(got, `\`) {
-			t.Fatalf("cleanRelativePath(%q) retained a foreign separator: %q", input, got)
+		if ok != (want != "") || got != want {
+			t.Fatalf("cleanRelativePath(%q) = %q, %v; want %q",
+				input, got, ok, want)
 		}
 	}
 }
