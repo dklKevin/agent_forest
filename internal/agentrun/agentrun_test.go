@@ -362,9 +362,16 @@ func TestEqualCausalTimeIdenticalDuplicatesAreOrderIndependent(t *testing.T) {
 		Failures:     []string{"same setback"},
 		Unresolved:   []string{"same question"},
 	}
+	equivalent := want
+	equivalent.UpdatedAt = at.In(time.FixedZone("EDT", -4*60*60))
+	equivalent.Steps = []Step{{
+		At:      equivalent.UpdatedAt,
+		Phase:   Testing,
+		Summary: "same curated summary",
+	}}
 	results := []presenceResult{
 		{p: want, causal: true},
-		{p: want, causal: true},
+		{p: equivalent, causal: true},
 		{p: Presence{Phase: Building, Active: true, UpdatedAt: at.Add(-time.Second)}, causal: true},
 	}
 	for _, ordered := range [][]presenceResult{
@@ -383,7 +390,7 @@ func TestEqualCausalTimeIdenticalDuplicatesAreOrderIndependent(t *testing.T) {
 	first := openLog(repo, "a-copy")
 	second := openLog(repo, "z-copy")
 	put(t, first, event(at, Testing, fields))
-	put(t, second, event(at, Testing, fields))
+	put(t, second, event(at.In(time.FixedZone("EDT", -4*60*60)), Testing, fields))
 	if err := os.Chtimes(first, now, now); err != nil {
 		t.Fatal(err)
 	}
@@ -426,6 +433,12 @@ func TestEqualCausalTimeRequiresFullPresenceConsensus(t *testing.T) {
 		{name: "objective", change: func(p *Presence) { p.Objective = "different" }},
 		{name: "steps", change: func(p *Presence) {
 			p.Steps = []Step{{At: at, Phase: Testing, Summary: "different"}}
+		}},
+		{name: "step phase", change: func(p *Presence) {
+			p.Steps = []Step{{At: at, Phase: Reviewing, Summary: "summary"}}
+		}},
+		{name: "step instant", change: func(p *Presence) {
+			p.Steps = []Step{{At: at.Add(time.Nanosecond), Phase: Testing, Summary: "summary"}}
 		}},
 		{name: "paths", change: func(p *Presence) { p.Paths = []string{"different.go"} }},
 		{name: "verification", change: func(p *Presence) { p.Verification = "failed" }},

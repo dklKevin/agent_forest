@@ -126,7 +126,9 @@ func Equal(a, b Presence) bool {
 		return false
 	}
 	for i := range a.Steps {
-		if a.Steps[i] != b.Steps[i] {
+		if a.Steps[i].Phase != b.Steps[i].Phase ||
+			a.Steps[i].Summary != b.Steps[i].Summary ||
+			!a.Steps[i].At.Equal(b.Steps[i].At) {
 			return false
 		}
 	}
