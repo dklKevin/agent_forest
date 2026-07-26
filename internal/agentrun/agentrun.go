@@ -100,6 +100,11 @@ type Presence struct {
 	Unresolved   []string
 }
 
+type presenceResult struct {
+	p      Presence
+	causal bool
+}
+
 // Available reports whether there is enough curated evidence to offer a work
 // plaque. A lone phase is useful even when the writer has not supplied prose.
 func (p Presence) Available() bool { return validPhase(p.Phase) }
@@ -198,11 +203,7 @@ func readWithBudgets(repo string, now time.Time, openLimit, gnhfLimit int64) Pre
 		}
 		return candidates[i].at.After(candidates[j].at)
 	})
-	type result struct {
-		p      Presence
-		causal bool
-	}
-	var found []result
+	var found []presenceResult
 	for _, item := range candidates {
 		info, err := os.Lstat(item.dir)
 		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
@@ -220,19 +221,50 @@ func readWithBudgets(repo string, now time.Time, openLimit, gnhfLimit int64) Pre
 			return Presence{}
 		}
 		if ok {
-			found = append(found, result{p: p, causal: item.provider == ".agentforest"})
+			found = append(found, presenceResult{p: p, causal: item.provider == ".agentforest"})
 		}
 	}
+	return selectPresence(found)
+}
+
+// selectPresence admits a winning run only when every candidate at the same
+// causal rank and maximum event time carries identical privacy-filtered truth.
+// Exact duplicates are safe to collapse: returning any of them produces the
+// same Presence, so filesystem metadata and enumeration order cannot affect
+// the visible phase, plaque, or activity state.
+func selectPresence(found []presenceResult) Presence {
 	if len(found) == 0 {
 		return Presence{}
 	}
-	sort.SliceStable(found, func(i, j int) bool {
-		if found[i].causal != found[j].causal {
-			return found[i].causal
+	causalRank := false
+	for _, item := range found {
+		if item.causal {
+			causalRank = true
+			break
 		}
-		return found[i].p.UpdatedAt.After(found[j].p.UpdatedAt)
-	})
-	return found[0].p
+	}
+	var maximum time.Time
+	for _, item := range found {
+		if item.causal == causalRank && item.p.UpdatedAt.After(maximum) {
+			maximum = item.p.UpdatedAt
+		}
+	}
+	var selected Presence
+	haveSelected := false
+	for _, item := range found {
+		if item.causal != causalRank || !item.p.UpdatedAt.Equal(maximum) {
+			continue
+		}
+		if !haveSelected {
+			selected = item.p
+			haveSelected = true
+			continue
+		}
+		if !Equal(selected, item.p) {
+			return Presence{}
+		}
+	}
+	return selected
 }
 
 func evidenceRoot(repo, name string) (string, bool) {

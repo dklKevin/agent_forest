@@ -288,6 +288,165 @@ func TestCausalTimestampBeatsTouchedMtimeWithinRunLimit(t *testing.T) {
 	}
 }
 
+func TestEqualCausalTimeConflictFailsClosedAcrossMtimeAndPathOrder(t *testing.T) {
+	now := time.Now().UTC()
+	at := now.Add(-time.Minute)
+	tests := []struct {
+		name          string
+		buildingRun   string
+		testingRun    string
+		buildingMtime time.Time
+		testingMtime  time.Time
+	}{
+		{
+			name:          "building sorts first and is touched newer",
+			buildingRun:   "a-building",
+			testingRun:    "z-testing",
+			buildingMtime: now,
+			testingMtime:  now.Add(-time.Hour),
+		},
+		{
+			name:          "building sorts first and is touched older",
+			buildingRun:   "a-building",
+			testingRun:    "z-testing",
+			buildingMtime: now.Add(-time.Hour),
+			testingMtime:  now,
+		},
+		{
+			name:          "testing sorts first and is touched newer",
+			buildingRun:   "z-building",
+			testingRun:    "a-testing",
+			buildingMtime: now.Add(-time.Hour),
+			testingMtime:  now,
+		},
+		{
+			name:          "testing sorts first and is touched older",
+			buildingRun:   "z-building",
+			testingRun:    "a-testing",
+			buildingMtime: now,
+			testingMtime:  now.Add(-time.Hour),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := t.TempDir()
+			building := openLog(repo, tt.buildingRun)
+			testing := openLog(repo, tt.testingRun)
+			put(t, building, event(at, Building, `"objective":"BUILDING-PRIVATE"`))
+			put(t, testing, event(at, Testing, `"objective":"TESTING-PRIVATE"`))
+			if err := os.Chtimes(building, tt.buildingMtime, tt.buildingMtime); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(testing, tt.testingMtime, tt.testingMtime); err != nil {
+				t.Fatal(err)
+			}
+
+			if p := Read(repo, now); p.Available() {
+				t.Fatalf("ambiguous equal-time truth survived: %+v", p)
+			}
+		})
+	}
+}
+
+func TestEqualCausalTimeIdenticalDuplicatesAreOrderIndependent(t *testing.T) {
+	now := time.Now().UTC()
+	at := now.Add(-time.Minute)
+	want := Presence{
+		Phase:        Testing,
+		Active:       true,
+		UpdatedAt:    at,
+		Objective:    "same curated objective",
+		Steps:        []Step{{At: at, Phase: Testing, Summary: "same curated summary"}},
+		Paths:        []string{"internal/agentrun/agentrun.go"},
+		Verification: "passed",
+		Failures:     []string{"same setback"},
+		Unresolved:   []string{"same question"},
+	}
+	results := []presenceResult{
+		{p: want, causal: true},
+		{p: want, causal: true},
+		{p: Presence{Phase: Building, Active: true, UpdatedAt: at.Add(-time.Second)}, causal: true},
+	}
+	for _, ordered := range [][]presenceResult{
+		results,
+		{results[2], results[1], results[0]},
+	} {
+		if got := selectPresence(ordered); !Equal(got, want) {
+			t.Fatalf("identical duplicate selection = %+v, want %+v", got, want)
+		}
+	}
+
+	repo := t.TempDir()
+	fields := `"objective":"same curated objective","summary":"same curated summary",` +
+		`"paths":["internal/agentrun/agentrun.go"],"verification":"passed",` +
+		`"failure":"same setback","unresolved":["same question"]`
+	first := openLog(repo, "a-copy")
+	second := openLog(repo, "z-copy")
+	put(t, first, event(at, Testing, fields))
+	put(t, second, event(at, Testing, fields))
+	if err := os.Chtimes(first, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(second, now.Add(-time.Hour), now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got := Read(repo, now); !Equal(got, want) {
+		t.Fatalf("identical duplicate read = %+v, want %+v", got, want)
+	}
+	if err := os.Chtimes(first, now.Add(-time.Hour), now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(second, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if got := Read(repo, now); !Equal(got, want) {
+		t.Fatalf("mtime-reversed duplicate read = %+v, want %+v", got, want)
+	}
+}
+
+func TestEqualCausalTimeRequiresFullPresenceConsensus(t *testing.T) {
+	at := time.Now().UTC().Add(-time.Minute)
+	base := Presence{
+		Phase:        Testing,
+		Active:       true,
+		UpdatedAt:    at,
+		Objective:    "objective",
+		Steps:        []Step{{At: at, Phase: Testing, Summary: "summary"}},
+		Paths:        []string{"one.go"},
+		Verification: "passed",
+		Failures:     []string{"setback"},
+		Unresolved:   []string{"question"},
+	}
+	tests := []struct {
+		name   string
+		change func(*Presence)
+	}{
+		{name: "phase", change: func(p *Presence) { p.Phase = Reviewing }},
+		{name: "activity", change: func(p *Presence) { p.Active = false }},
+		{name: "objective", change: func(p *Presence) { p.Objective = "different" }},
+		{name: "steps", change: func(p *Presence) {
+			p.Steps = []Step{{At: at, Phase: Testing, Summary: "different"}}
+		}},
+		{name: "paths", change: func(p *Presence) { p.Paths = []string{"different.go"} }},
+		{name: "verification", change: func(p *Presence) { p.Verification = "failed" }},
+		{name: "failures", change: func(p *Presence) { p.Failures = []string{"different"} }},
+		{name: "unresolved", change: func(p *Presence) { p.Unresolved = []string{"different"} }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conflict := base
+			tt.change(&conflict)
+			got := selectPresence([]presenceResult{
+				{p: base, causal: true},
+				{p: conflict, causal: true},
+			})
+			if got.Available() {
+				t.Fatalf("%s disagreement did not fail closed: %+v", tt.name, got)
+			}
+		})
+	}
+}
+
 func TestCausalNewestRunWinsAcrossProviders(t *testing.T) {
 	repo := t.TempDir()
 	now := time.Now().UTC()
@@ -305,6 +464,62 @@ func TestCausalNewestRunWinsAcrossProviders(t *testing.T) {
 	p := Read(repo, now)
 	if p.Phase != Testing || p.Objective != "causally-fresh" {
 		t.Fatalf("touched compatibility evidence starved causally newer run: %+v", p)
+	}
+}
+
+func TestCausalProviderTruthIsStableAcrossCompatibilityTieOrder(t *testing.T) {
+	now := time.Now().UTC()
+	at := now.Add(-time.Minute)
+	causal := Presence{
+		Phase: Testing, Active: true, UpdatedAt: at, Objective: "causal truth",
+	}
+	compatibility := Presence{
+		Phase: Building, Active: true, UpdatedAt: at,
+	}
+	for _, ordered := range [][]presenceResult{
+		{{p: causal, causal: true}, {p: compatibility, causal: false}},
+		{{p: compatibility, causal: false}, {p: causal, causal: true}},
+	} {
+		if got := selectPresence(ordered); !Equal(got, causal) {
+			t.Fatalf("compatibility order changed causal truth: %+v", got)
+		}
+	}
+
+	for _, names := range []struct {
+		name          string
+		causalRun     string
+		compatibility string
+	}{
+		{name: "causal path sorts first", causalRun: "a-causal", compatibility: "z-compatibility"},
+		{name: "compatibility path sorts first", causalRun: "z-causal", compatibility: "a-compatibility"},
+	} {
+		t.Run(names.name, func(t *testing.T) {
+			repo := t.TempDir()
+			openPath := openLog(repo, names.causalRun)
+			gnhfPath := filepath.Join(repo, ".gnhf", "runs", names.compatibility, "iteration-1.jsonl")
+			put(t, openPath, event(at, Testing, `"objective":"causal truth"`))
+			put(t, gnhfPath, `{"type":"item.started"}`+"\n")
+
+			if err := os.Chtimes(openPath, now, now); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(gnhfPath, at, at); err != nil {
+				t.Fatal(err)
+			}
+			if got := Read(repo, now); !Equal(got, causal) {
+				t.Fatalf("compatibility tie changed causal truth: %+v", got)
+			}
+
+			if err := os.Chtimes(openPath, at.Add(-time.Hour), at.Add(-time.Hour)); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(gnhfPath, now, now); err != nil {
+				t.Fatal(err)
+			}
+			if got := Read(repo, now); !Equal(got, causal) {
+				t.Fatalf("mtime reversal changed causal truth: %+v", got)
+			}
+		})
 	}
 }
 

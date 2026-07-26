@@ -94,10 +94,17 @@ a `.gnhf` compatibility run may contain at most 64 entries. A file is capped at
 separate 32 MiB `.agentforest` and 16 MiB `.gnhf` repository budgets.
 Provider-neutral runs are ordered by their event timestamps. Compatibility runs
 use file timestamps only within `.gnhf` and never outrank causal
-provider-neutral evidence. If a traversal or byte limit is exceeded, or selected
-evidence is unreadable, unsafe, replaced, or grows while its bounded descriptor
-snapshot is being read, the whole plaque read fails closed instead of choosing
-a convenient but potentially stale run.
+provider-neutral evidence. If multiple provider-neutral runs share the maximum
+event timestamp, they produce a plaque only when their complete privacy-filtered
+presence is identical; exact duplicates collapse to that common result.
+Conflicting phase, activity, or plaque truth at the same causal time is
+ambiguous and produces no presence or plaque. File timestamps, paths, provider
+order, and run IDs cannot break that tie. Compatibility evidence is considered
+only when there is no valid provider-neutral run; tied compatibility leaders
+use the same full-presence consensus rule. If a traversal or byte limit is
+exceeded, or selected evidence is unreadable, unsafe, replaced, or grows while
+its bounded descriptor snapshot is being read, the whole plaque read fails
+closed instead of choosing a convenient but potentially stale run.
 
 ## Running it
 
