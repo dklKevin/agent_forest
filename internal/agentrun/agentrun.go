@@ -105,6 +105,11 @@ type presenceResult struct {
 	causal bool
 }
 
+type tierResult struct {
+	found     []presenceResult
+	uncertain bool
+}
+
 // Available reports whether there is enough curated evidence to offer a work
 // plaque. A lone phase is useful even when the writer has not supplied prose.
 func (p Presence) Available() bool { return validPhase(p.Phase) }
@@ -154,54 +159,47 @@ func Read(repo string, now time.Time) Presence {
 }
 
 func readWithBudgets(repo string, now time.Time, openLimit, gnhfLimit int64) Presence {
-	budgets := map[string]*readBudget{
-		".agentforest": {remaining: openLimit},
-		".gnhf":        {remaining: gnhfLimit},
+	authoritative := scanTier(repo, ".agentforest", now, &readBudget{remaining: openLimit})
+	if authoritative.uncertain {
+		return Presence{}
 	}
+	if len(authoritative.found) > 0 {
+		return selectPresence(authoritative.found)
+	}
+
+	compatibility := scanTier(repo, ".gnhf", now, &readBudget{remaining: gnhfLimit})
+	if compatibility.uncertain {
+		return Presence{}
+	}
+	return selectPresence(compatibility.found)
+}
+
+func scanTier(repo, provider string, now time.Time, budget *readBudget) tierResult {
 	type candidate struct {
-		dir      string
-		provider string
-		at       time.Time
+		dir string
+		at  time.Time
 	}
-	var candidates []candidate
-	if root, ok := evidenceRoot(repo, ".agentforest"); ok {
-		entries, err := recentRunDirs(root)
-		if err != nil {
-			return Presence{}
-		}
-		for _, entry := range entries {
-			dir := filepath.Join(root, entry.Name())
-			at, err := runEvidenceModTime(root, dir)
-			if err != nil {
-				return Presence{}
-			}
-			candidates = append(candidates, candidate{
-				dir: dir, provider: ".agentforest", at: at,
-			})
-		}
+	root, present, uncertain := evidenceRoot(repo, provider)
+	if uncertain || !present {
+		return tierResult{uncertain: uncertain}
 	}
-	if root, ok := evidenceRoot(repo, ".gnhf"); ok {
-		entries, err := recentRunDirs(root)
+
+	entries, err := recentRunDirs(root)
+	if err != nil {
+		return tierResult{uncertain: true}
+	}
+	candidates := make([]candidate, 0, len(entries))
+	for _, entry := range entries {
+		dir := filepath.Join(root, entry.Name())
+		at, err := runEvidenceModTime(root, dir)
 		if err != nil {
-			return Presence{}
+			return tierResult{uncertain: true}
 		}
-		for _, entry := range entries {
-			dir := filepath.Join(root, entry.Name())
-			at, err := runEvidenceModTime(root, dir)
-			if err != nil {
-				return Presence{}
-			}
-			candidates = append(candidates, candidate{
-				dir: dir, provider: ".gnhf", at: at,
-			})
-		}
+		candidates = append(candidates, candidate{dir: dir, at: at})
 	}
 	sort.Slice(candidates, func(i, j int) bool {
 		if candidates[i].at.Equal(candidates[j].at) {
-			if candidates[i].provider == candidates[j].provider {
-				return candidates[i].dir < candidates[j].dir
-			}
-			return candidates[i].provider < candidates[j].provider
+			return candidates[i].dir < candidates[j].dir
 		}
 		return candidates[i].at.After(candidates[j].at)
 	})
@@ -209,24 +207,24 @@ func readWithBudgets(repo string, now time.Time, openLimit, gnhfLimit int64) Pre
 	for _, item := range candidates {
 		info, err := os.Lstat(item.dir)
 		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			return Presence{}
+			return tierResult{uncertain: true}
 		}
 		var p Presence
 		var ok bool
-		switch item.provider {
+		switch provider {
 		case ".agentforest":
-			p, ok = readOpenRun(item.dir, now, budgets[item.provider])
+			p, ok = readOpenRun(item.dir, now, budget)
 		case ".gnhf":
-			p, ok = readGNHFRun(item.dir, now, budgets[item.provider])
+			p, ok = readGNHFRun(item.dir, now, budget)
 		}
-		if budgets[item.provider].uncertain {
-			return Presence{}
+		if budget.uncertain {
+			return tierResult{uncertain: true}
 		}
 		if ok {
-			found = append(found, presenceResult{p: p, causal: item.provider == ".agentforest"})
+			found = append(found, presenceResult{p: p, causal: provider == ".agentforest"})
 		}
 	}
-	return selectPresence(found)
+	return tierResult{found: found}
 }
 
 // selectPresence admits a winning run only when every candidate at the same
@@ -269,18 +267,24 @@ func selectPresence(found []presenceResult) Presence {
 	return selected
 }
 
-func evidenceRoot(repo, name string) (string, bool) {
+func evidenceRoot(repo, name string) (root string, present, uncertain bool) {
 	base := filepath.Join(repo, name)
 	info, err := os.Lstat(base)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return "", false
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, false
 	}
-	root := filepath.Join(base, "runs")
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "", false, true
+	}
+	root = filepath.Join(base, "runs")
 	info, err = os.Lstat(root)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return "", false
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, false
 	}
-	return root, true
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "", false, true
+	}
+	return root, true, false
 }
 
 type openEvent struct {
@@ -463,10 +467,15 @@ func recentRunDirs(root string) ([]os.DirEntry, error) {
 
 func runEvidenceModTime(root, dir string) (time.Time, error) {
 	if filepath.Base(filepath.Dir(root)) == ".agentforest" {
-		if info, ok := regularEvidenceInfo(filepath.Join(dir, "events.jsonl")); ok {
-			return info.ModTime(), nil
+		path := filepath.Join(dir, "events.jsonl")
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			return time.Time{}, nil
 		}
-		return time.Time{}, nil
+		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			return time.Time{}, errors.New("unsafe provider-neutral evidence file")
+		}
+		return info.ModTime(), nil
 	}
 	entries, err := safeReadDir(dir, maxRunEntries)
 	if err != nil {
@@ -775,8 +784,8 @@ func cleanRelativePath(path string) (string, bool) {
 func Fingerprint(repo string) string {
 	h := sha256.New()
 	for _, name := range []string{".agentforest", ".gnhf"} {
-		root, ok := evidenceRoot(repo, name)
-		if !ok {
+		root, present, _ := evidenceRoot(repo, name)
+		if !present {
 			continue
 		}
 		runs, err := recentRunDirs(root)

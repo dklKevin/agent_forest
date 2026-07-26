@@ -334,6 +334,8 @@ func TestEqualCausalTimeConflictFailsClosedAcrossMtimeAndPathOrder(t *testing.T)
 			testing := openLog(repo, tt.testingRun)
 			put(t, building, event(at, Building, `"objective":"BUILDING-PRIVATE"`))
 			put(t, testing, event(at, Testing, `"objective":"TESTING-PRIVATE"`))
+			put(t, filepath.Join(repo, ".gnhf", "runs", "fallback", "iteration-1.jsonl"),
+				`{"type":"item.started"}`+"\n")
 			if err := os.Chtimes(building, tt.buildingMtime, tt.buildingMtime); err != nil {
 				t.Fatal(err)
 			}
@@ -546,30 +548,109 @@ func TestSafeReadDirKeepsHardTraversalLimit(t *testing.T) {
 	}
 }
 
-func TestOverflowingGNHFRunFailsClosed(t *testing.T) {
+func TestOverflowingGNHFCannotVetoAuthoritativeTruth(t *testing.T) {
 	repo := t.TempDir()
 	now := time.Now().UTC()
-	put(t, openLog(repo, "otherwise-visible"), event(now.Add(-time.Hour), Planning, `"objective":"must-not-leak"`))
+	want := Presence{
+		Phase: Planning, Active: true, UpdatedAt: now.Add(-time.Minute),
+		Objective: "causal truth",
+	}
+	put(t, openLog(repo, "authoritative"),
+		event(want.UpdatedAt, want.Phase, `"objective":"causal truth"`))
 	run := filepath.Join(repo, ".gnhf", "runs", "overflow")
 	for i := 1; i <= maxRunEntries+1; i++ {
 		put(t, filepath.Join(run, fmt.Sprintf("iteration-%d.jsonl", i)),
 			`{"type":"thread.started"}`+"\n")
 	}
-	if p := Read(repo, now); p.Available() {
-		t.Fatalf("truncated run published a stale phase: %+v", p)
+	if got := Read(repo, now); !Equal(got, want) {
+		t.Fatalf("compatibility traversal overflow vetoed causal truth: %+v", got)
 	}
 }
 
-func TestOversizedEvidenceFileFailsRepositoryClosed(t *testing.T) {
+func TestOversizedGNHFCannotVetoAuthoritativeTruth(t *testing.T) {
 	repo := t.TempDir()
 	now := time.Now().UTC()
-	put(t, openLog(repo, "otherwise-visible"),
-		event(now.Add(-time.Minute), Testing, `"objective":"must-not-leak"`))
+	want := Presence{
+		Phase: Testing, Active: true, UpdatedAt: now.Add(-time.Minute),
+		Objective: "causal truth",
+	}
+	put(t, openLog(repo, "authoritative"),
+		event(want.UpdatedAt, want.Phase, `"objective":"causal truth"`))
 	put(t, filepath.Join(repo, ".gnhf", "runs", "oversized", "iteration-1.jsonl"),
 		strings.Repeat("x", maxFileBytes+1))
 
-	if p := Read(repo, now); p.Available() {
-		t.Fatalf("oversized provider candidate allowed stale fallback: %+v", p)
+	if got := Read(repo, now); !Equal(got, want) {
+		t.Fatalf("oversized compatibility evidence vetoed causal truth: %+v", got)
+	}
+}
+
+func TestActiveCompatibilityTierStillFailsClosed(t *testing.T) {
+	now := time.Now().UTC()
+	t.Run("traversal overflow", func(t *testing.T) {
+		repo := t.TempDir()
+		run := filepath.Join(repo, ".gnhf", "runs", "overflow")
+		for i := 1; i <= maxRunEntries+1; i++ {
+			put(t, filepath.Join(run, fmt.Sprintf("iteration-%d.jsonl", i)),
+				`{"type":"thread.started"}`+"\n")
+		}
+		if p := Read(repo, now); p.Available() {
+			t.Fatalf("overflowing active compatibility tier published presence: %+v", p)
+		}
+	})
+	t.Run("oversized file", func(t *testing.T) {
+		repo := t.TempDir()
+		put(t, filepath.Join(repo, ".gnhf", "runs", "oversized", "iteration-1.jsonl"),
+			strings.Repeat("x", maxFileBytes+1))
+		if p := Read(repo, now); p.Available() {
+			t.Fatalf("oversized active compatibility tier published presence: %+v", p)
+		}
+	})
+}
+
+func TestAuthoritativeUncertaintyDoesNotFallBackToCompatibility(t *testing.T) {
+	now := time.Now().UTC()
+	addCompatibility := func(t *testing.T, repo string) {
+		t.Helper()
+		path := filepath.Join(repo, ".gnhf", "runs", "otherwise-visible", "iteration-1.jsonl")
+		put(t, path, `{"type":"item.started"}`+"\n")
+		if err := os.Chtimes(path, now, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Run("malformed evidence file", func(t *testing.T) {
+		repo := t.TempDir()
+		if err := os.MkdirAll(openLog(repo, "malformed"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		addCompatibility(t, repo)
+		if p := Read(repo, now); p.Available() {
+			t.Fatalf("unsafe authoritative file allowed compatibility fallback: %+v", p)
+		}
+	})
+	t.Run("run overflow", func(t *testing.T) {
+		repo := t.TempDir()
+		for i := 0; i <= maxRuns; i++ {
+			put(t, openLog(repo, fmt.Sprintf("run-%02d", i)),
+				event(now.Add(-time.Duration(i)*time.Second), Planning, ""))
+		}
+		addCompatibility(t, repo)
+		if p := Read(repo, now); p.Available() {
+			t.Fatalf("authoritative traversal overflow allowed compatibility fallback: %+v", p)
+		}
+	})
+}
+
+func TestCompatibilityIsUsedAfterCleanAuthoritativeNoObservation(t *testing.T) {
+	repo := t.TempDir()
+	now := time.Now().UTC()
+	put(t, openLog(repo, "no-observation"), "{}\n")
+	path := filepath.Join(repo, ".gnhf", "runs", "visible", "iteration-1.jsonl")
+	put(t, path, `{"type":"item.started"}`+"\n")
+	if err := os.Chtimes(path, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if p := Read(repo, now); p.Phase != Building || !p.Active {
+		t.Fatalf("clean authoritative no-observation did not use compatibility: %+v", p)
 	}
 }
 
@@ -740,6 +821,41 @@ func TestConcurrentGrowthCannotExceedChargedBudgetOrPublishRecord(t *testing.T) 
 	}
 	if budget.consumed != int64(len(initial)) {
 		t.Fatalf("actual bytes were not reconciled: consumed=%d want=%d", budget.consumed, len(initial))
+	}
+}
+
+func TestAuthoritativeConcurrentGrowthRemainsTierUncertainty(t *testing.T) {
+	repo := t.TempDir()
+	now := time.Now().UTC()
+	path := openLog(repo, "growing")
+	initial := event(now.Add(-time.Minute), Planning, `"objective":"initial"`)
+	put(t, path, initial)
+
+	budget := &readBudget{remaining: int64(len(initial))}
+	budget.beforeRead = func(got string) {
+		if got != path {
+			return
+		}
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteString(event(now, Reviewing, `"objective":"uncommitted-growth"`)); err != nil {
+			f.Close()
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result := scanTier(repo, ".agentforest", now, budget)
+	if !result.uncertain || len(result.found) != 0 {
+		t.Fatalf("concurrent authoritative growth was not tier uncertainty: %+v", result)
+	}
+	if budget.consumed != int64(len(initial)) || budget.remaining < 0 {
+		t.Fatalf("actual-read budget escaped bounds: consumed=%d remaining=%d",
+			budget.consumed, budget.remaining)
 	}
 }
 

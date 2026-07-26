@@ -93,18 +93,23 @@ a `.gnhf` compatibility run may contain at most 64 entries. A file is capped at
 1 MiB, a complete record at 64 KiB, and descriptor reads are charged against
 separate 32 MiB `.agentforest` and 16 MiB `.gnhf` repository budgets.
 Provider-neutral runs are ordered by their event timestamps. Compatibility runs
-use file timestamps only within `.gnhf` and never outrank causal
-provider-neutral evidence. If multiple provider-neutral runs share the maximum
-event timestamp, they produce a plaque only when their complete privacy-filtered
-presence is identical; exact duplicates collapse to that common result.
-Conflicting phase, activity, or plaque truth at the same causal time is
-ambiguous and produces no presence or plaque. File timestamps, paths, provider
-order, and run IDs cannot break that tie. Compatibility evidence is considered
-only when there is no valid provider-neutral run; tied compatibility leaders
-use the same full-presence consensus rule. If a traversal or byte limit is
-exceeded, or selected evidence is unreadable, unsafe, replaced, or grows while
-its bounded descriptor snapshot is being read, the whole plaque read fails
-closed instead of choosing a convenient but potentially stale run.
+use file timestamps only within `.gnhf`. The roots are strict authority tiers:
+AgentForest scans and validates the complete `.agentforest` tier first. If it
+contains any valid causal observation, only the maximum event timestamp is
+eligible and every observation tied there must carry identical complete,
+privacy-filtered presence; exact duplicates collapse, while a contradiction
+produces no presence. `.gnhf` is not traversed in that case, so compatibility
+overflow, malformed or oversized files, concurrent growth, and other lower-tier
+uncertainty cannot veto causal truth.
+
+Compatibility evidence is considered only after `.agentforest` is cleanly
+absent or its bounded scan completes with no valid causal observation. Tied
+`.gnhf` leaders then use the same full-presence consensus rule. Uncertainty in
+the active tier always fails closed: traversal or byte overflow, unreadable or
+unsafe evidence, replacement, identity changes, and growth during a bounded
+descriptor read produce no plaque. In particular, uncertainty in
+`.agentforest` never falls through to `.gnhf`. File timestamps, paths, provider
+order, and run IDs cannot break a tie in either tier.
 
 ## Running it
 
