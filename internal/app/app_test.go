@@ -553,6 +553,43 @@ func TestRepoScanErrorPreservesCursorAndVolatileState(t *testing.T) {
 	}
 }
 
+func TestFirstScanPublishesAuthoritativeFingerprintScope(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "busy")
+	now := time.Now().UTC()
+	mkRepo(t, repo, now.Add(-time.Hour), "main.go", "package main")
+	writeRunEvidence(t, repo, now.Add(-time.Minute), "testing", "authoritative")
+	compatibility := filepath.Join(repo, ".gnhf", "runs", "compatibility", "iteration-1.jsonl")
+	if err := os.MkdirAll(filepath.Dir(compatibility), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(compatibility, []byte("{\"type\":\"item.started\"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := &App{Dir: t.TempDir(), Settings: &store.Settings{}}
+	rep, err := a.RescanRepo(repo, now)
+	if err != nil || len(rep.Errors) != 0 {
+		t.Fatalf("first scan failed: report=%+v err=%v", rep, err)
+	}
+	cursor := rep.Fingerprints[repo]
+	if !strings.Contains(cursor, ":a:") {
+		t.Fatalf("first scan did not publish authoritative scope: %q", cursor)
+	}
+	f, err := os.OpenFile(compatibility, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("{\"type\":\"turn.completed\"}\n"); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := PollFingerprint(repo, cursor); got != cursor {
+		t.Fatal("compatibility metadata changed first authoritative cursor")
+	}
+}
+
 // Occupancy is ephemeral by design: a relaunch knows nothing of it until a
 // scan reads it again, so a stale camp can never haunt a town from disk.
 func TestOccupancyDoesNotSurviveRelaunch(t *testing.T) {

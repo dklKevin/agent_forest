@@ -459,7 +459,7 @@ func (m *Model) maybePoll() tea.Cmd {
 		if path == "" {
 			continue
 		}
-		fp := app.PollFingerprint(path)
+		fp := app.PollFingerprint(path, m.fps[path])
 		if fp == "" {
 			continue // repo gone: it stands, and decays, on its history
 		}

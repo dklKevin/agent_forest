@@ -791,14 +791,14 @@ func TestFingerprintChangesWithoutFollowingSymlinks(t *testing.T) {
 	now := time.Now().UTC()
 	path := openLog(repo, "one")
 	put(t, path, event(now, Planning, ""))
-	first := Fingerprint(repo)
+	first := FingerprintFor(repo, FingerprintAuthoritative)
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, _ = f.WriteString(event(now.Add(time.Second), Building, ""))
 	_ = f.Close()
-	second := Fingerprint(repo)
+	second := FingerprintFor(repo, FingerprintAuthoritative)
 	if first == second {
 		t.Fatal("append did not change fingerprint")
 	}
@@ -808,9 +808,9 @@ func TestFingerprintChangesWithoutFollowingSymlinks(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(repo, ".agentforest", "runs", "one", "outside")); err != nil {
 		t.Fatal(err)
 	}
-	before := Fingerprint(repo)
+	before := FingerprintFor(repo, FingerprintAuthoritative)
 	put(t, outside, "a much larger outside value")
-	if after := Fingerprint(repo); before != after {
+	if after := FingerprintFor(repo, FingerprintAuthoritative); before != after {
 		t.Fatal("fingerprint followed a symlink target")
 	}
 }
@@ -821,11 +821,8 @@ func TestFingerprintStopsAtAuthoritativeCausalTruth(t *testing.T) {
 	put(t, openLog(repo, "authoritative"), event(now.Add(-time.Minute), Testing, ""))
 	compatibility := filepath.Join(repo, ".gnhf", "runs", "compatibility", "iteration-1.jsonl")
 	put(t, compatibility, `{"type":"item.started"}`+"\n")
-	if p := Read(repo, now); p.Phase != Testing {
-		t.Fatalf("authoritative setup was not selected: %+v", p)
-	}
 
-	first := Fingerprint(repo)
+	first := FingerprintFor(repo, FingerprintAuthoritative)
 	f, err := os.OpenFile(compatibility, os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -837,7 +834,7 @@ func TestFingerprintStopsAtAuthoritativeCausalTruth(t *testing.T) {
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if second := Fingerprint(repo); second != first {
+	if second := FingerprintFor(repo, FingerprintAuthoritative); second != first {
 		t.Fatal("compatibility mutation changed authoritative fingerprint")
 	}
 }
@@ -847,11 +844,12 @@ func TestFingerprintIncludesCompatibilityAfterCleanAuthoritativeAbsence(t *testi
 	put(t, openLog(repo, "no-observation"), "{}\n")
 	compatibility := filepath.Join(repo, ".gnhf", "runs", "compatibility", "iteration-1.jsonl")
 	put(t, compatibility, `{"type":"item.started"}`+"\n")
-	if p := Read(repo, time.Now()); p.Phase != Building {
+	p, scope := ReadWithScope(repo, time.Now())
+	if p.Phase != Building || scope != FingerprintCompatibility {
 		t.Fatalf("compatibility setup was not selected: %+v", p)
 	}
 
-	first := Fingerprint(repo)
+	first := FingerprintFor(repo, scope)
 	f, err := os.OpenFile(compatibility, os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -863,7 +861,7 @@ func TestFingerprintIncludesCompatibilityAfterCleanAuthoritativeAbsence(t *testi
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if second := Fingerprint(repo); second == first {
+	if second := FingerprintFor(repo, scope); second == first {
 		t.Fatal("active compatibility mutation did not change fallback fingerprint")
 	}
 }
@@ -873,17 +871,14 @@ func TestFingerprintChangesWhenAuthoritativeEvidenceBecomesUnsafe(t *testing.T) 
 	now := time.Now().UTC()
 	path := openLog(repo, "authoritative")
 	put(t, path, event(now.Add(-time.Minute), Testing, ""))
-	if p := Read(repo, now); p.Phase != Testing {
-		t.Fatalf("authoritative setup was not selected: %+v", p)
-	}
-	first := Fingerprint(repo)
+	first := FingerprintFor(repo, FingerprintAuthoritative)
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Mkdir(path, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if second := Fingerprint(repo); second == first {
+	if second := FingerprintFor(repo, FingerprintAuthoritative); second == first {
 		t.Fatal("unsafe authoritative state did not change fingerprint")
 	}
 }
@@ -896,14 +891,11 @@ func TestFingerprintDoesNotReadEvidenceContent(t *testing.T) {
 	put(t, path, initial)
 	put(t, filepath.Join(repo, ".gnhf", "runs", "compatibility", "iteration-1.jsonl"),
 		`{"type":"item.started"}`+"\n")
-	if p := Read(repo, now); p.Phase != Testing {
-		t.Fatalf("authoritative setup was not selected: %+v", p)
-	}
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	first := Fingerprint(repo)
+	first := FingerprintFor(repo, FingerprintAuthoritative)
 	replacement := "{}\n" + strings.Repeat(" ", len(initial)-3)
 	if err := os.WriteFile(path, []byte(replacement), info.Mode()); err != nil {
 		t.Fatal(err)
@@ -911,7 +903,7 @@ func TestFingerprintDoesNotReadEvidenceContent(t *testing.T) {
 	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
 		t.Fatal(err)
 	}
-	if second := Fingerprint(repo); second != first {
+	if second := FingerprintFor(repo, FingerprintAuthoritative); second != first {
 		t.Fatal("fingerprint inspected evidence content")
 	}
 }

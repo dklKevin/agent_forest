@@ -17,7 +17,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -117,7 +116,24 @@ type runDir struct {
 	at   time.Time
 }
 
-var fingerprintScopes sync.Map
+type FingerprintScope uint8
+
+const (
+	FingerprintAuthoritative FingerprintScope = iota
+	FingerprintCompatibility
+)
+
+type Fingerprints struct {
+	authoritative string
+	compatibility string
+}
+
+func (f Fingerprints) For(scope FingerprintScope) string {
+	if scope == FingerprintAuthoritative {
+		return "a:" + f.authoritative
+	}
+	return "c:" + f.compatibility
+}
 
 // Available reports whether there is enough curated evidence to offer a work
 // plaque. A lone phase is useful even when the writer has not supplied prose.
@@ -168,22 +184,28 @@ func Read(repo string, now time.Time) Presence {
 }
 
 func readWithBudgets(repo string, now time.Time, openLimit, gnhfLimit int64) Presence {
+	p, _ := readWithScope(repo, now, openLimit, gnhfLimit)
+	return p
+}
+
+func ReadWithScope(repo string, now time.Time) (Presence, FingerprintScope) {
+	return readWithScope(repo, now, maxOpenBytes, maxGNHFBytes)
+}
+
+func readWithScope(repo string, now time.Time, openLimit, gnhfLimit int64) (Presence, FingerprintScope) {
 	authoritative := scanTier(repo, ".agentforest", now, &readBudget{remaining: openLimit})
 	if authoritative.uncertain {
-		fingerprintScopes.Store(filepath.Clean(repo), true)
-		return Presence{}
+		return Presence{}, FingerprintAuthoritative
 	}
 	if len(authoritative.found) > 0 {
-		fingerprintScopes.Store(filepath.Clean(repo), true)
-		return selectPresence(authoritative.found)
+		return selectPresence(authoritative.found), FingerprintAuthoritative
 	}
 
-	fingerprintScopes.Store(filepath.Clean(repo), false)
 	compatibility := scanTier(repo, ".gnhf", now, &readBudget{remaining: gnhfLimit})
 	if compatibility.uncertain {
-		return Presence{}
+		return Presence{}, FingerprintCompatibility
 	}
-	return selectPresence(compatibility.found)
+	return selectPresence(compatibility.found), FingerprintCompatibility
 }
 
 func scanTier(repo, provider string, now time.Time, budget *readBudget) tierResult {
@@ -868,17 +890,38 @@ func cleanRelativePath(path string) (string, bool) {
 
 // Fingerprint returns a cheap metadata-only digest of the supported local
 // evidence roots. It follows no symlinks and reads no evidence content.
-func Fingerprint(repo string) string {
-	h := sha256.New()
-	if !fingerprintTier(h, repo, ".agentforest") {
-		return hex.EncodeToString(h.Sum(nil))
+func Fingerprint(repo string) Fingerprints {
+	var authoritative bytes.Buffer
+	stable := fingerprintTier(&authoritative, repo, ".agentforest")
+	authDigest := fingerprintDigest(authoritative.Bytes())
+	if !stable {
+		return Fingerprints{authoritative: authDigest, compatibility: authDigest}
 	}
-	authoritativeOnly, _ := fingerprintScopes.Load(filepath.Clean(repo))
-	if authoritativeOnly, _ := authoritativeOnly.(bool); authoritativeOnly {
-		return hex.EncodeToString(h.Sum(nil))
+	var compatibility bytes.Buffer
+	_, _ = compatibility.Write(authoritative.Bytes())
+	fingerprintTier(&compatibility, repo, ".gnhf")
+	return Fingerprints{
+		authoritative: authDigest,
+		compatibility: fingerprintDigest(compatibility.Bytes()),
 	}
-	fingerprintTier(h, repo, ".gnhf")
-	return hex.EncodeToString(h.Sum(nil))
+}
+
+func FingerprintFor(repo string, scope FingerprintScope) string {
+	var data bytes.Buffer
+	stable := fingerprintTier(&data, repo, ".agentforest")
+	if stable && scope == FingerprintCompatibility {
+		fingerprintTier(&data, repo, ".gnhf")
+	}
+	digest := fingerprintDigest(data.Bytes())
+	if scope == FingerprintAuthoritative {
+		return "a:" + digest
+	}
+	return "c:" + digest
+}
+
+func fingerprintDigest(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 func fingerprintTier(h io.Writer, repo, name string) bool {

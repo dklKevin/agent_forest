@@ -327,11 +327,14 @@ func (a *App) scan(repos []string, now time.Time, pruneMissing bool) (ScanReport
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			fp := PollFingerprint(repo)
+			gitFP := gitscan.Fingerprint(repo)
+			runFP := agentrun.Fingerprint(repo)
 			evs, err := gitscan.Scan(repo, known[repo], now)
+			run, scope := agentrun.ReadWithScope(repo, now)
 			results[i] = result{
 				repo: repo, evs: evs, err: err,
-				occ: gitscan.ReadOccupancy(repo), run: agentrun.Read(repo, now), fp: fp,
+				occ: gitscan.ReadOccupancy(repo), run: run,
+				fp: pollFingerprint(gitFP, runFP.For(scope)),
 			}
 		}(i, repo)
 	}
@@ -408,12 +411,22 @@ func (a *App) scan(repos []string, now time.Time, pruneMissing bool) (ScanReport
 	return rep, nil
 }
 
-func PollFingerprint(repo string) string {
-	gitFP := gitscan.Fingerprint(repo)
+func PollFingerprint(repo string, previous ...string) string {
+	scope := agentrun.FingerprintCompatibility
+	if len(previous) > 0 {
+		parts := strings.Split(previous[0], ":")
+		if len(parts) >= 2 && parts[len(parts)-2] == "a" {
+			scope = agentrun.FingerprintAuthoritative
+		}
+	}
+	return pollFingerprint(gitscan.Fingerprint(repo), agentrun.FingerprintFor(repo, scope))
+}
+
+func pollFingerprint(gitFP, runFP string) string {
 	if gitFP == "" {
 		return ""
 	}
-	return gitFP + ":" + agentrun.Fingerprint(repo)
+	return gitFP + ":" + runFP
 }
 
 // KnownByRepo derives, per repository, what the event log already recorded:
