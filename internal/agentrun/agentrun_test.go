@@ -821,6 +821,9 @@ func TestFingerprintStopsAtAuthoritativeCausalTruth(t *testing.T) {
 	put(t, openLog(repo, "authoritative"), event(now.Add(-time.Minute), Testing, ""))
 	compatibility := filepath.Join(repo, ".gnhf", "runs", "compatibility", "iteration-1.jsonl")
 	put(t, compatibility, `{"type":"item.started"}`+"\n")
+	if p := Read(repo, now); p.Phase != Testing {
+		t.Fatalf("authoritative setup was not selected: %+v", p)
+	}
 
 	first := Fingerprint(repo)
 	f, err := os.OpenFile(compatibility, os.O_APPEND|os.O_WRONLY, 0)
@@ -844,6 +847,9 @@ func TestFingerprintIncludesCompatibilityAfterCleanAuthoritativeAbsence(t *testi
 	put(t, openLog(repo, "no-observation"), "{}\n")
 	compatibility := filepath.Join(repo, ".gnhf", "runs", "compatibility", "iteration-1.jsonl")
 	put(t, compatibility, `{"type":"item.started"}`+"\n")
+	if p := Read(repo, time.Now()); p.Phase != Building {
+		t.Fatalf("compatibility setup was not selected: %+v", p)
+	}
 
 	first := Fingerprint(repo)
 	f, err := os.OpenFile(compatibility, os.O_APPEND|os.O_WRONLY, 0)
@@ -867,6 +873,9 @@ func TestFingerprintChangesWhenAuthoritativeEvidenceBecomesUnsafe(t *testing.T) 
 	now := time.Now().UTC()
 	path := openLog(repo, "authoritative")
 	put(t, path, event(now.Add(-time.Minute), Testing, ""))
+	if p := Read(repo, now); p.Phase != Testing {
+		t.Fatalf("authoritative setup was not selected: %+v", p)
+	}
 	first := Fingerprint(repo)
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
@@ -876,6 +885,34 @@ func TestFingerprintChangesWhenAuthoritativeEvidenceBecomesUnsafe(t *testing.T) 
 	}
 	if second := Fingerprint(repo); second == first {
 		t.Fatal("unsafe authoritative state did not change fingerprint")
+	}
+}
+
+func TestFingerprintDoesNotReadEvidenceContent(t *testing.T) {
+	repo := t.TempDir()
+	now := time.Now().UTC()
+	path := openLog(repo, "authoritative")
+	initial := event(now.Add(-time.Minute), Testing, "")
+	put(t, path, initial)
+	put(t, filepath.Join(repo, ".gnhf", "runs", "compatibility", "iteration-1.jsonl"),
+		`{"type":"item.started"}`+"\n")
+	if p := Read(repo, now); p.Phase != Testing {
+		t.Fatalf("authoritative setup was not selected: %+v", p)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := Fingerprint(repo)
+	replacement := "{}\n" + strings.Repeat(" ", len(initial)-3)
+	if err := os.WriteFile(path, []byte(replacement), info.Mode()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if second := Fingerprint(repo); second != first {
+		t.Fatal("fingerprint inspected evidence content")
 	}
 }
 

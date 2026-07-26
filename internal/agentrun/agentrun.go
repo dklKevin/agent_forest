@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -116,6 +117,8 @@ type runDir struct {
 	at   time.Time
 }
 
+var fingerprintScopes sync.Map
+
 // Available reports whether there is enough curated evidence to offer a work
 // plaque. A lone phase is useful even when the writer has not supplied prose.
 func (p Presence) Available() bool { return validPhase(p.Phase) }
@@ -167,12 +170,15 @@ func Read(repo string, now time.Time) Presence {
 func readWithBudgets(repo string, now time.Time, openLimit, gnhfLimit int64) Presence {
 	authoritative := scanTier(repo, ".agentforest", now, &readBudget{remaining: openLimit})
 	if authoritative.uncertain {
+		fingerprintScopes.Store(filepath.Clean(repo), true)
 		return Presence{}
 	}
 	if len(authoritative.found) > 0 {
+		fingerprintScopes.Store(filepath.Clean(repo), true)
 		return selectPresence(authoritative.found)
 	}
 
+	fingerprintScopes.Store(filepath.Clean(repo), false)
 	compatibility := scanTier(repo, ".gnhf", now, &readBudget{remaining: gnhfLimit})
 	if compatibility.uncertain {
 		return Presence{}
@@ -860,36 +866,36 @@ func cleanRelativePath(path string) (string, bool) {
 	return cleanText(filepath.ToSlash(clean)), true
 }
 
-// Fingerprint returns a digest of the supported local evidence roots. It
-// follows no symlinks and includes no evidence content in the digest.
+// Fingerprint returns a cheap metadata-only digest of the supported local
+// evidence roots. It follows no symlinks and reads no evidence content.
 func Fingerprint(repo string) string {
 	h := sha256.New()
-	now := time.Now()
-	authoritative := scanTier(repo, ".agentforest", now, &readBudget{remaining: maxOpenBytes})
-	fingerprintTier(h, repo, ".agentforest", authoritative)
-	if authoritative.uncertain || len(authoritative.found) > 0 {
+	if !fingerprintTier(h, repo, ".agentforest") {
 		return hex.EncodeToString(h.Sum(nil))
 	}
-	compatibility := scanTier(repo, ".gnhf", now, &readBudget{remaining: maxGNHFBytes})
-	fingerprintTier(h, repo, ".gnhf", compatibility)
+	authoritativeOnly, _ := fingerprintScopes.Load(filepath.Clean(repo))
+	if authoritativeOnly, _ := authoritativeOnly.(bool); authoritativeOnly {
+		return hex.EncodeToString(h.Sum(nil))
+	}
+	fingerprintTier(h, repo, ".gnhf")
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func fingerprintTier(h io.Writer, repo, name string, result tierResult) {
-	_, _ = fmt.Fprintf(h, "%s\x00%t\x00%d\x00", name, result.uncertain, len(result.found))
+func fingerprintTier(h io.Writer, repo, name string) bool {
+	_, _ = fmt.Fprintf(h, "%s\x00", name)
 	root, present, uncertain := evidenceRoot(repo, name)
 	if uncertain {
 		_, _ = io.WriteString(h, "unsafe\x00")
-		return
+		return false
 	}
 	if !present {
 		_, _ = io.WriteString(h, "absent\x00")
-		return
+		return true
 	}
 	runs, err := recentRunDirs(root)
 	if err != nil {
 		_, _ = io.WriteString(h, "unstable\x00")
-		return
+		return false
 	}
 	for _, run := range runs {
 		dir := filepath.Join(root, run.name)
@@ -897,11 +903,12 @@ func fingerprintTier(h io.Writer, repo, name string, result tierResult) {
 			info, ok := regularEvidenceInfo(path)
 			if !ok {
 				_, _ = io.WriteString(h, "unsafe-file\x00")
-				continue
+				return false
 			}
 			rel, _ := filepath.Rel(repo, path)
 			_, _ = fmt.Fprintf(h, "%s\x00%d\x00%d\x00%d\x00",
 				rel, info.Size(), info.ModTime().UnixNano(), info.Mode())
 		}
 	}
+	return true
 }
