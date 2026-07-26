@@ -548,6 +548,78 @@ func TestSafeReadDirKeepsHardTraversalLimit(t *testing.T) {
 	}
 }
 
+func TestSafeReadDirRejectsNamespaceMutation(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, string)
+	}{
+		{
+			name: "addition",
+			mutate: func(t *testing.T, dir string) {
+				if err := os.Mkdir(filepath.Join(dir, "added"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "removal",
+			mutate: func(t *testing.T, dir string) {
+				if err := os.RemoveAll(filepath.Join(dir, "run")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "replacement",
+			mutate: func(t *testing.T, dir string) {
+				run := filepath.Join(dir, "run")
+				if err := os.Rename(run, filepath.Join(dir, "old")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(run, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.Mkdir(filepath.Join(dir, "run"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			entries, err := safeReadDirAfter(dir, maxDirEntries, func() {
+				tt.mutate(t, dir)
+			})
+			if err == nil || entries != nil {
+				t.Fatalf("namespace %s returned a stable enumeration", tt.name)
+			}
+		})
+	}
+}
+
+func TestAuthoritativeRunAdditionDuringScanFailsClosed(t *testing.T) {
+	repo := t.TempDir()
+	now := time.Now().UTC()
+	initial := openLog(repo, "initial")
+	put(t, initial, event(now.Add(-time.Minute), Planning, ""))
+	budget := &readBudget{remaining: maxOpenBytes}
+	var once sync.Once
+	budget.beforeRead = func(path string) {
+		if path != initial {
+			return
+		}
+		once.Do(func() {
+			put(t, openLog(repo, "added"), event(now, Testing, ""))
+		})
+	}
+
+	result := scanTier(repo, ".agentforest", now, budget)
+	if !result.uncertain || len(result.found) != 0 {
+		t.Fatalf("concurrent run addition was not tier uncertainty: %+v", result)
+	}
+}
+
 func TestOverflowingGNHFCannotVetoAuthoritativeTruth(t *testing.T) {
 	repo := t.TempDir()
 	now := time.Now().UTC()
@@ -740,6 +812,94 @@ func TestFingerprintChangesWithoutFollowingSymlinks(t *testing.T) {
 	put(t, outside, "a much larger outside value")
 	if after := Fingerprint(repo); before != after {
 		t.Fatal("fingerprint followed a symlink target")
+	}
+}
+
+func TestFingerprintStopsAtAuthoritativeCausalTruth(t *testing.T) {
+	repo := t.TempDir()
+	now := time.Now().UTC()
+	put(t, openLog(repo, "authoritative"), event(now.Add(-time.Minute), Testing, ""))
+	compatibility := filepath.Join(repo, ".gnhf", "runs", "compatibility", "iteration-1.jsonl")
+	put(t, compatibility, `{"type":"item.started"}`+"\n")
+
+	first := Fingerprint(repo)
+	f, err := os.OpenFile(compatibility, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"type":"turn.completed"}` + "\n"); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if second := Fingerprint(repo); second != first {
+		t.Fatal("compatibility mutation changed authoritative fingerprint")
+	}
+}
+
+func TestFingerprintIncludesCompatibilityAfterCleanAuthoritativeAbsence(t *testing.T) {
+	repo := t.TempDir()
+	put(t, openLog(repo, "no-observation"), "{}\n")
+	compatibility := filepath.Join(repo, ".gnhf", "runs", "compatibility", "iteration-1.jsonl")
+	put(t, compatibility, `{"type":"item.started"}`+"\n")
+
+	first := Fingerprint(repo)
+	f, err := os.OpenFile(compatibility, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"type":"turn.completed"}` + "\n"); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if second := Fingerprint(repo); second == first {
+		t.Fatal("active compatibility mutation did not change fallback fingerprint")
+	}
+}
+
+func TestFingerprintChangesWhenAuthoritativeEvidenceBecomesUnsafe(t *testing.T) {
+	repo := t.TempDir()
+	now := time.Now().UTC()
+	path := openLog(repo, "authoritative")
+	put(t, path, event(now.Add(-time.Minute), Testing, ""))
+	first := Fingerprint(repo)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if second := Fingerprint(repo); second == first {
+		t.Fatal("unsafe authoritative state did not change fingerprint")
+	}
+}
+
+func TestSafeReadFileRejectsAtomicPathReplacement(t *testing.T) {
+	repo := t.TempDir()
+	now := time.Now().UTC()
+	path := openLog(repo, "replaced")
+	initial := event(now.Add(-time.Minute), Planning, "")
+	put(t, path, initial)
+	budget := &readBudget{remaining: maxOpenBytes}
+	budget.beforeRead = func(got string) {
+		if got != path {
+			return
+		}
+		if err := os.Rename(path, path+".old"); err != nil {
+			t.Fatal(err)
+		}
+		put(t, path, event(now, Testing, ""))
+	}
+
+	data, _, err := safeReadFileInfo(path, budget)
+	if err == nil || data != nil || !budget.uncertain {
+		t.Fatalf("atomic pathname replacement was accepted: bytes=%d uncertain=%v",
+			len(data), budget.uncertain)
 	}
 }
 

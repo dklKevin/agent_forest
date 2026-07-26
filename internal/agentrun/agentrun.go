@@ -110,6 +110,12 @@ type tierResult struct {
 	uncertain bool
 }
 
+type runDir struct {
+	name string
+	info os.FileInfo
+	at   time.Time
+}
+
 // Available reports whether there is enough curated evidence to offer a work
 // plaque. A lone phase is useful even when the writer has not supplied prose.
 func (p Presence) Available() bool { return validPhase(p.Phase) }
@@ -190,12 +196,10 @@ func scanTier(repo, provider string, now time.Time, budget *readBudget) tierResu
 	}
 	candidates := make([]candidate, 0, len(entries))
 	for _, entry := range entries {
-		dir := filepath.Join(root, entry.Name())
-		at, err := runEvidenceModTime(root, dir)
-		if err != nil {
-			return tierResult{uncertain: true}
-		}
-		candidates = append(candidates, candidate{dir: dir, at: at})
+		candidates = append(candidates, candidate{
+			dir: filepath.Join(root, entry.name),
+			at:  entry.at,
+		})
 	}
 	sort.Slice(candidates, func(i, j int) bool {
 		if candidates[i].at.Equal(candidates[j].at) {
@@ -223,6 +227,10 @@ func scanTier(repo, provider string, now time.Time, budget *readBudget) tierResu
 		if ok {
 			found = append(found, presenceResult{p: p, causal: provider == ".agentforest"})
 		}
+	}
+	after, err := recentRunDirs(root)
+	if err != nil || !sameRunDirs(entries, after) {
+		return tierResult{uncertain: true}
 	}
 	return tierResult{found: found}
 }
@@ -421,24 +429,23 @@ func readGNHFRun(dir string, now time.Time, budget *readBudget) (Presence, bool)
 	return p, true
 }
 
-func recentRunDirs(root string) ([]os.DirEntry, error) {
+func recentRunDirs(root string) ([]runDir, error) {
 	entries, err := safeReadDir(root, maxDirEntries)
 	if err != nil {
 		return nil, err
 	}
-	type candidate struct {
-		entry os.DirEntry
-		at    time.Time
-	}
-	candidates := make([]candidate, 0, len(entries))
+	candidates := make([]runDir, 0, len(entries))
 	for _, entry := range entries {
 		if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
 			continue
 		}
 		dir := filepath.Join(root, entry.Name())
 		info, err := os.Lstat(dir)
-		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			continue
+		if err != nil {
+			return nil, err
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return nil, errors.New("local evidence run changed during traversal")
 		}
 		at, err := runEvidenceModTime(root, dir)
 		if err != nil {
@@ -447,22 +454,35 @@ func recentRunDirs(root string) ([]os.DirEntry, error) {
 		if at.IsZero() {
 			continue
 		}
-		candidates = append(candidates, candidate{entry: entry, at: at})
+		candidates = append(candidates, runDir{name: entry.Name(), info: info, at: at})
 	}
 	sort.Slice(candidates, func(i, j int) bool {
 		if candidates[i].at.Equal(candidates[j].at) {
-			return candidates[i].entry.Name() < candidates[j].entry.Name()
+			return candidates[i].name < candidates[j].name
 		}
 		return candidates[i].at.After(candidates[j].at)
 	})
 	if len(candidates) > maxRuns {
 		return nil, errors.New("local evidence run count exceeds causal selection limit")
 	}
-	out := make([]os.DirEntry, len(candidates))
-	for i, item := range candidates {
-		out[i] = item.entry
+	return candidates, nil
+}
+
+func sameRunDirs(a, b []runDir) bool {
+	if len(a) != len(b) {
+		return false
 	}
-	return out, nil
+	byName := make(map[string]os.FileInfo, len(a))
+	for _, run := range a {
+		byName[run.name] = run.info
+	}
+	for _, run := range b {
+		info, ok := byName[run.name]
+		if !ok || !os.SameFile(info, run.info) {
+			return false
+		}
+	}
+	return true
 }
 
 func runEvidenceModTime(root, dir string) (time.Time, error) {
@@ -637,9 +657,12 @@ func safeReadFileInfo(path string, budget *readBudget) ([]byte, os.FileInfo, err
 		return nil, nil, errors.New("local evidence exceeds scan byte budget")
 	}
 	after, statErr := f.Stat()
+	pathAfter, pathStatErr := os.Lstat(path)
 	if readErr != nil || statErr != nil || int64(len(data)) != opened.Size() ||
 		!os.SameFile(opened, after) || after.Size() != opened.Size() ||
-		!after.ModTime().Equal(opened.ModTime()) {
+		!after.ModTime().Equal(opened.ModTime()) || pathStatErr != nil ||
+		!pathAfter.Mode().IsRegular() || pathAfter.Mode()&os.ModeSymlink != 0 ||
+		!os.SameFile(opened, pathAfter) {
 		budget.uncertain = true
 		return nil, nil, errors.New("local evidence changed while reading")
 	}
@@ -647,6 +670,10 @@ func safeReadFileInfo(path string, budget *readBudget) ([]byte, os.FileInfo, err
 }
 
 func safeReadDir(path string, limit int) ([]os.DirEntry, error) {
+	return safeReadDirAfter(path, limit, nil)
+}
+
+func safeReadDirAfter(path string, limit int, afterRead func()) ([]os.DirEntry, error) {
 	if limit <= 0 {
 		return nil, errors.New("local evidence directory limit must be positive")
 	}
@@ -670,8 +697,62 @@ func safeReadDir(path string, limit int) ([]os.DirEntry, error) {
 	if len(entries) > limit {
 		return nil, errors.New("local evidence directory exceeds traversal limit")
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
-	return entries, nil
+	first, err := dirEntryInfos(entries)
+	if err != nil {
+		return nil, err
+	}
+	if afterRead != nil {
+		afterRead()
+	}
+	current, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer current.Close()
+	currentInfo, err := current.Stat()
+	if err != nil || !os.SameFile(opened, currentInfo) || !currentInfo.IsDir() {
+		return nil, errors.New("local evidence directory changed during traversal")
+	}
+	currentEntries, err := current.ReadDir(limit + 1)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	if len(currentEntries) > limit {
+		return nil, errors.New("local evidence directory exceeds traversal limit")
+	}
+	second, err := dirEntryInfos(currentEntries)
+	if err != nil || !sameDirEntryInfos(first, second) {
+		return nil, errors.New("local evidence directory namespace changed during traversal")
+	}
+	sort.Slice(currentEntries, func(i, j int) bool {
+		return currentEntries[i].Name() < currentEntries[j].Name()
+	})
+	return currentEntries, nil
+}
+
+func dirEntryInfos(entries []os.DirEntry) (map[string]os.FileInfo, error) {
+	infos := make(map[string]os.FileInfo, len(entries))
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			return nil, err
+		}
+		infos[entry.Name()] = info
+	}
+	return infos, nil
+}
+
+func sameDirEntryInfos(a, b map[string]os.FileInfo) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for name, first := range a {
+		second, ok := b[name]
+		if !ok || !os.SameFile(first, second) {
+			return false
+		}
+	}
+	return true
 }
 
 // forEachCompleteLine consumes newline-terminated records only. Append-only
@@ -779,34 +860,48 @@ func cleanRelativePath(path string) (string, bool) {
 	return cleanText(filepath.ToSlash(clean)), true
 }
 
-// Fingerprint returns a cheap metadata-only digest of the supported local
-// evidence roots. It follows no symlinks and reads no evidence content.
+// Fingerprint returns a digest of the supported local evidence roots. It
+// follows no symlinks and includes no evidence content in the digest.
 func Fingerprint(repo string) string {
 	h := sha256.New()
-	for _, name := range []string{".agentforest", ".gnhf"} {
-		root, present, _ := evidenceRoot(repo, name)
-		if !present {
-			continue
-		}
-		runs, err := recentRunDirs(root)
-		if err != nil {
-			continue
-		}
-		for _, run := range runs {
-			if !run.IsDir() || run.Type()&os.ModeSymlink != 0 {
+	now := time.Now()
+	authoritative := scanTier(repo, ".agentforest", now, &readBudget{remaining: maxOpenBytes})
+	fingerprintTier(h, repo, ".agentforest", authoritative)
+	if authoritative.uncertain || len(authoritative.found) > 0 {
+		return hex.EncodeToString(h.Sum(nil))
+	}
+	compatibility := scanTier(repo, ".gnhf", now, &readBudget{remaining: maxGNHFBytes})
+	fingerprintTier(h, repo, ".gnhf", compatibility)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func fingerprintTier(h io.Writer, repo, name string, result tierResult) {
+	_, _ = fmt.Fprintf(h, "%s\x00%t\x00%d\x00", name, result.uncertain, len(result.found))
+	root, present, uncertain := evidenceRoot(repo, name)
+	if uncertain {
+		_, _ = io.WriteString(h, "unsafe\x00")
+		return
+	}
+	if !present {
+		_, _ = io.WriteString(h, "absent\x00")
+		return
+	}
+	runs, err := recentRunDirs(root)
+	if err != nil {
+		_, _ = io.WriteString(h, "unstable\x00")
+		return
+	}
+	for _, run := range runs {
+		dir := filepath.Join(root, run.name)
+		for _, path := range fingerprintFiles(root, dir) {
+			info, ok := regularEvidenceInfo(path)
+			if !ok {
+				_, _ = io.WriteString(h, "unsafe-file\x00")
 				continue
 			}
-			dir := filepath.Join(root, run.Name())
-			for _, path := range fingerprintFiles(root, dir) {
-				info, ok := regularEvidenceInfo(path)
-				if !ok {
-					continue
-				}
-				rel, _ := filepath.Rel(repo, path)
-				_, _ = fmt.Fprintf(h, "%s\x00%d\x00%d\x00%d\x00",
-					rel, info.Size(), info.ModTime().UnixNano(), info.Mode())
-			}
+			rel, _ := filepath.Rel(repo, path)
+			_, _ = fmt.Fprintf(h, "%s\x00%d\x00%d\x00%d\x00",
+				rel, info.Size(), info.ModTime().UnixNano(), info.Mode())
 		}
 	}
-	return hex.EncodeToString(h.Sum(nil))
 }
