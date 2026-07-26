@@ -34,8 +34,8 @@ const (
 	moveFPS = 15
 	idleFPS = 6
 	// pollEvery is how often connected repos are checked for git or local-run
-	// evidence changes while the app is open. The check reads filesystem
-	// metadata and a few small control files without spawning processes.
+	// evidence changes while the app is open. The check reads bounded
+	// filesystem metadata only and does not spawn processes.
 	pollEvery = 2500 * time.Millisecond
 	// reviveDur is how long a town takes to shake off decay and show tended
 	// traces again when a new commit lands.

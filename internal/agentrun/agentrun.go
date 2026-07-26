@@ -197,9 +197,9 @@ func sameStrings(a, b []string) bool {
 }
 
 // Read inspects the two documented local evidence roots and selects a valid
-// run. Malformed records, incomplete final lines, and symlinks are ignored;
-// unreadable, changing, or over-budget evidence encountered during bounded
-// selection makes it fail closed.
+// run. Malformed records and incomplete final lines are ignored; symlinks are
+// never followed. Unreadable, changing, unsafe, or over-budget evidence
+// encountered during bounded selection makes it fail closed.
 func Read(repo string, now time.Time) Presence {
 	return readWithBudgets(repo, now, maxOpenBytes, maxGNHFBytes)
 }
