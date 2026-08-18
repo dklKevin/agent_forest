@@ -348,7 +348,7 @@ func (m *Model) rebuildWorld() {
 // forest, the config-supplied events for the demo.
 func (m *Model) almanacEvents() []events.Event {
 	if !m.demo && m.app != nil {
-		return m.app.Events
+		return m.app.EventsSnapshot()
 	}
 	return m.evs
 }
@@ -593,7 +593,7 @@ func (m *Model) beginPulse() {
 	if m.demo || m.app == nil {
 		return
 	}
-	stirs := app.SinceLastVisit(m.app.Events, m.lastOpened, m.now)
+	stirs := app.SinceLastVisit(m.app.EventsSnapshot(), m.lastOpened, m.now)
 	started := 0
 	toasted := false
 	for _, st := range stirs {

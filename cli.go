@@ -221,7 +221,7 @@ func cmdAlmanac(args []string) int {
 		fmt.Println("help: Run `agentforest towns` to see every town")
 		return 1
 	}
-	m := almanac.Fold(a.Events, key, time.Now())
+	m := almanac.Fold(a.EventsSnapshot(), key, time.Now())
 	if m == nil {
 		// FindTown resolves against the same log, so this cannot happen; if
 		// it somehow does, fail with a next step rather than a blank page.
@@ -322,7 +322,7 @@ func findFinishState(a *app.App, nameOrPath string) (key string, finished bool, 
 	if err != nil {
 		return "", false, err
 	}
-	for _, r := range events.Reduce(a.Events) {
+	for _, r := range events.Reduce(a.EventsSnapshot()) {
 		if r.Path == key {
 			return key, r.Finished, nil
 		}

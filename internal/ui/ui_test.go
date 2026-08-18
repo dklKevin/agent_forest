@@ -10,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/dklKevin/agentforest/internal/almanac"
 	"github.com/dklKevin/agentforest/internal/app"
 	"github.com/dklKevin/agentforest/internal/canvas"
 	"github.com/dklKevin/agentforest/internal/demo"
@@ -96,6 +97,80 @@ func mkUIRepo(t *testing.T, dir string) {
 	}
 	gitInUI(t, dir, "add", "-A")
 	gitInUI(t, dir, "commit", "-q", "-m", "c")
+}
+
+// The scan command runs away from Bubble Tea's UI goroutine. Town building
+// and the almanac must both read one guarded event snapshot while that scan
+// publishes newly discovered history.
+func TestScanAndUIReadEventsConcurrently(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "live")
+	mkUIRepo(t, repo)
+	a := &app.App{Dir: t.TempDir(), Settings: &store.Settings{}}
+	m := Model{app: a}
+
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	control := t.TempDir()
+	started := filepath.Join(control, "started")
+	release := filepath.Join(control, "release")
+	t.Cleanup(func() { _ = os.WriteFile(release, nil, 0o644) })
+	wrapper := filepath.Join(control, "git")
+	script := "#!/bin/sh\n" +
+		"if [ \"$4\" = \"rev-list\" ]; then\n" +
+		"  : > \"$SCAN_STARTED\"\n" +
+		"  while [ ! -e \"$SCAN_RELEASE\" ]; do sleep 0.01; done\n" +
+		"fi\n" +
+		"exec \"$REAL_GIT\" \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", control+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("REAL_GIT", realGit)
+	t.Setenv("SCAN_STARTED", started)
+	t.Setenv("SCAN_RELEASE", release)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := a.RescanRepo(repo, time.Now())
+		done <- err
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(started); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("scan did not reach git")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	_ = a.Towns()
+	_ = almanac.Fold(m.almanacEvents(), repo, time.Now())
+	if err := os.WriteFile(release, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(a.Towns()) != 1 {
+				t.Fatal("scan history did not build a town")
+			}
+			if almanac.Fold(m.almanacEvents(), repo, time.Now()) == nil {
+				t.Fatal("scan history did not build an almanac")
+			}
+			return
+		default:
+			_ = a.Towns()
+			_ = almanac.Fold(m.almanacEvents(), repo, time.Now())
+		}
+	}
 }
 
 // The occupancy line lives in inspect and only while the working tree holds

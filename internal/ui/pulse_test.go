@@ -30,7 +30,15 @@ func pulseTown(path, name string, commits ...time.Time) []events.Event {
 // startup scan's completion.
 func pulseModel(t *testing.T, evs []events.Event, lastOpened, now time.Time) Model {
 	t.Helper()
-	a := &app.App{Dir: t.TempDir(), Settings: &store.Settings{}, Events: evs}
+	home := t.TempDir()
+	t.Setenv("AGENTFOREST_HOME", home)
+	if err := store.AppendEvents(home, evs); err != nil {
+		t.Fatal(err)
+	}
+	a, err := app.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
 	repos := events.Reduce(evs)
 	towns := make([]*model.Town, 0, len(repos))
 	for _, r := range repos {
