@@ -4,11 +4,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dklKevin/agentforest/internal/canvas"
-	"github.com/dklKevin/agentforest/internal/demo"
-	"github.com/dklKevin/agentforest/internal/forest"
-	"github.com/dklKevin/agentforest/internal/goldentest"
-	"github.com/dklKevin/agentforest/internal/render"
+	"github.com/dklKevin/agent_forest/internal/canvas"
+	"github.com/dklKevin/agent_forest/internal/demo"
+	"github.com/dklKevin/agent_forest/internal/forest"
+	"github.com/dklKevin/agent_forest/internal/goldentest"
+	"github.com/dklKevin/agent_forest/internal/render"
 )
 
 // fixedNow owns the clock for every snapshot golden. The demo builds its whole

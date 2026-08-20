@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dklKevin/agentforest/internal/events"
-	"github.com/dklKevin/agentforest/internal/store"
+	"github.com/dklKevin/agent_forest/internal/events"
+	"github.com/dklKevin/agent_forest/internal/store"
 )
 
 // capture runs fn with stdout redirected, returning what it printed and the

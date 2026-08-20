@@ -1,4 +1,4 @@
-module github.com/dklKevin/agentforest
+module github.com/dklKevin/agent_forest
 
 go 1.26.4
 

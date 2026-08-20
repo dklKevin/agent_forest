@@ -11,9 +11,9 @@ import (
 	"sort"
 	"time"
 
-	"github.com/dklKevin/agentforest/internal/events"
-	"github.com/dklKevin/agentforest/internal/model"
-	"github.com/dklKevin/agentforest/internal/store"
+	"github.com/dklKevin/agent_forest/internal/events"
+	"github.com/dklKevin/agent_forest/internal/model"
+	"github.com/dklKevin/agent_forest/internal/store"
 )
 
 // Stir is one town's change while the forest was closed, ranked so the UI can

@@ -10,15 +10,15 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/dklKevin/agentforest/internal/app"
-	"github.com/dklKevin/agentforest/internal/canvas"
-	"github.com/dklKevin/agentforest/internal/demo"
-	"github.com/dklKevin/agentforest/internal/events"
-	"github.com/dklKevin/agentforest/internal/forest"
-	"github.com/dklKevin/agentforest/internal/gallery"
-	"github.com/dklKevin/agentforest/internal/model"
-	"github.com/dklKevin/agentforest/internal/render"
-	"github.com/dklKevin/agentforest/internal/ui"
+	"github.com/dklKevin/agent_forest/internal/app"
+	"github.com/dklKevin/agent_forest/internal/canvas"
+	"github.com/dklKevin/agent_forest/internal/demo"
+	"github.com/dklKevin/agent_forest/internal/events"
+	"github.com/dklKevin/agent_forest/internal/forest"
+	"github.com/dklKevin/agent_forest/internal/gallery"
+	"github.com/dklKevin/agent_forest/internal/model"
+	"github.com/dklKevin/agent_forest/internal/render"
+	"github.com/dklKevin/agent_forest/internal/ui"
 )
 
 var version = "0.3.0"

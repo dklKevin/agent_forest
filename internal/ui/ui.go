@@ -15,14 +15,14 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/harmonica"
 
-	"github.com/dklKevin/agentforest/internal/almanac"
-	"github.com/dklKevin/agentforest/internal/app"
-	"github.com/dklKevin/agentforest/internal/canvas"
-	"github.com/dklKevin/agentforest/internal/events"
-	"github.com/dklKevin/agentforest/internal/forest"
-	"github.com/dklKevin/agentforest/internal/gitscan"
-	"github.com/dklKevin/agentforest/internal/guidebook"
-	"github.com/dklKevin/agentforest/internal/model"
+	"github.com/dklKevin/agent_forest/internal/almanac"
+	"github.com/dklKevin/agent_forest/internal/app"
+	"github.com/dklKevin/agent_forest/internal/canvas"
+	"github.com/dklKevin/agent_forest/internal/events"
+	"github.com/dklKevin/agent_forest/internal/forest"
+	"github.com/dklKevin/agent_forest/internal/gitscan"
+	"github.com/dklKevin/agent_forest/internal/guidebook"
+	"github.com/dklKevin/agent_forest/internal/model"
 )
 
 const (

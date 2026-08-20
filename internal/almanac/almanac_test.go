@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dklKevin/agentforest/internal/events"
+	"github.com/dklKevin/agent_forest/internal/events"
 )
 
 var planted = time.Date(2018, 3, 10, 12, 0, 0, 0, time.UTC)

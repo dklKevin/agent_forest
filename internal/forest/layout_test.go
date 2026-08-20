@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dklKevin/agentforest/internal/events"
-	"github.com/dklKevin/agentforest/internal/model"
+	"github.com/dklKevin/agent_forest/internal/events"
+	"github.com/dklKevin/agent_forest/internal/model"
 )
 
 func testTowns(now time.Time) []*model.Town {
