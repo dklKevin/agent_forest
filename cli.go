@@ -426,9 +426,12 @@ func pluralize(n int, word string) string {
 	return fmt.Sprintf("%d %ss", n, word)
 }
 
-// toonField quotes a value only when it would break the row shape.
+// toonField quotes a value when it would break the row shape or inject
+// control characters into the terminal.
 func toonField(s string) string {
-	if strings.ContainsAny(s, ", \"\t") {
+	if strings.ContainsAny(s, ", \"\t") || strings.IndexFunc(s, func(r rune) bool {
+		return r < 0x20 || r == 0x7f
+	}) >= 0 {
 		return fmt.Sprintf("%q", s)
 	}
 	return s
