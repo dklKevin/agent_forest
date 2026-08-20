@@ -3,8 +3,8 @@ package main
 import (
 	"testing"
 
-	"github.com/dklKevin/agentforest/internal/app"
-	"github.com/dklKevin/agentforest/internal/store"
+	"github.com/dklKevin/agent_forest/internal/app"
+	"github.com/dklKevin/agent_forest/internal/store"
 )
 
 func TestShouldStampLastOpenedOnExit(t *testing.T) {

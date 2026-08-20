@@ -8,8 +8,8 @@ package sprite
 import (
 	"math"
 
-	"github.com/dklKevin/agentforest/internal/model"
-	"github.com/dklKevin/agentforest/internal/xnoise"
+	"github.com/dklKevin/agent_forest/internal/model"
+	"github.com/dklKevin/agent_forest/internal/xnoise"
 )
 
 // Building is one settlement structure, fully described so drawing is

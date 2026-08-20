@@ -3,9 +3,9 @@ package gallery_test
 import (
 	"testing"
 
-	"github.com/dklKevin/agentforest/internal/canvas"
-	"github.com/dklKevin/agentforest/internal/gallery"
-	"github.com/dklKevin/agentforest/internal/goldentest"
+	"github.com/dklKevin/agent_forest/internal/canvas"
+	"github.com/dklKevin/agent_forest/internal/gallery"
+	"github.com/dklKevin/agent_forest/internal/goldentest"
 )
 
 // The reference sheets are pure functions of (kind, width, height, profile) -

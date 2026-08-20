@@ -9,9 +9,9 @@ import (
 	"sort"
 	"time"
 
-	"github.com/dklKevin/agentforest/internal/model"
-	"github.com/dklKevin/agentforest/internal/sprite"
-	"github.com/dklKevin/agentforest/internal/xnoise"
+	"github.com/dklKevin/agent_forest/internal/model"
+	"github.com/dklKevin/agent_forest/internal/sprite"
+	"github.com/dklKevin/agent_forest/internal/xnoise"
 )
 
 // Reference viewport height in dots; stature and terrain are designed against

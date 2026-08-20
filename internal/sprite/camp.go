@@ -9,7 +9,7 @@ package sprite
 import (
 	"math"
 
-	"github.com/dklKevin/agentforest/internal/xnoise"
+	"github.com/dklKevin/agent_forest/internal/xnoise"
 )
 
 // Camp is one town's occupancy mark, fully described so drawing is

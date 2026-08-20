@@ -6,9 +6,9 @@ package demo
 import (
 	"time"
 
-	"github.com/dklKevin/agentforest/internal/events"
-	"github.com/dklKevin/agentforest/internal/model"
-	"github.com/dklKevin/agentforest/internal/xnoise"
+	"github.com/dklKevin/agent_forest/internal/events"
+	"github.com/dklKevin/agent_forest/internal/model"
+	"github.com/dklKevin/agent_forest/internal/xnoise"
 )
 
 type spec struct {

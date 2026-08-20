@@ -23,7 +23,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dklKevin/agentforest/internal/events"
+	"github.com/dklKevin/agent_forest/internal/events"
 )
 
 // gitTimeout bounds every git invocation so one wedged repo cannot hang the

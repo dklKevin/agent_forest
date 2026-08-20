@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dklKevin/agentforest/internal/events"
-	"github.com/dklKevin/agentforest/internal/model"
-	"github.com/dklKevin/agentforest/internal/store"
+	"github.com/dklKevin/agent_forest/internal/events"
+	"github.com/dklKevin/agent_forest/internal/model"
+	"github.com/dklKevin/agent_forest/internal/store"
 )
 
 const day = 24 * time.Hour

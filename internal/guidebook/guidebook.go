@@ -13,7 +13,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/dklKevin/agentforest/internal/gitscan"
+	"github.com/dklKevin/agent_forest/internal/gitscan"
 )
 
 // introMaxRunes caps the README excerpt: a guidebook entry is a few quiet

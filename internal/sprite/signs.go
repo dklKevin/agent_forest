@@ -1,7 +1,7 @@
 package sprite
 
 import (
-	"github.com/dklKevin/agentforest/internal/xnoise"
+	"github.com/dklKevin/agent_forest/internal/xnoise"
 )
 
 // Sign draws a town's name plaque on a post. The name is the world's focal

@@ -4,12 +4,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dklKevin/agentforest/internal/canvas"
-	"github.com/dklKevin/agentforest/internal/events"
-	"github.com/dklKevin/agentforest/internal/forest"
-	"github.com/dklKevin/agentforest/internal/goldentest"
-	"github.com/dklKevin/agentforest/internal/model"
-	"github.com/dklKevin/agentforest/internal/render"
+	"github.com/dklKevin/agent_forest/internal/canvas"
+	"github.com/dklKevin/agent_forest/internal/events"
+	"github.com/dklKevin/agent_forest/internal/forest"
+	"github.com/dklKevin/agent_forest/internal/goldentest"
+	"github.com/dklKevin/agent_forest/internal/model"
+	"github.com/dklKevin/agent_forest/internal/render"
 )
 
 // Layer C: in-process goldens over hand-built fixtures. Unlike the demo

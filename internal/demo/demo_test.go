@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dklKevin/agentforest/internal/events"
+	"github.com/dklKevin/agent_forest/internal/events"
 )
 
 func TestEventsCarryFinishedCast(t *testing.T) {

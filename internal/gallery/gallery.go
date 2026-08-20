@@ -11,9 +11,9 @@ package gallery
 import (
 	"fmt"
 
-	"github.com/dklKevin/agentforest/internal/canvas"
-	"github.com/dklKevin/agentforest/internal/model"
-	"github.com/dklKevin/agentforest/internal/sprite"
+	"github.com/dklKevin/agent_forest/internal/canvas"
+	"github.com/dklKevin/agent_forest/internal/model"
+	"github.com/dklKevin/agent_forest/internal/sprite"
 )
 
 // Kinds are the reference sheets RenderGallery understands.

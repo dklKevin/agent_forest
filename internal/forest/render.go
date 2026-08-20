@@ -4,10 +4,10 @@ import (
 	"math"
 	"time"
 
-	"github.com/dklKevin/agentforest/internal/canvas"
-	"github.com/dklKevin/agentforest/internal/model"
-	"github.com/dklKevin/agentforest/internal/sprite"
-	"github.com/dklKevin/agentforest/internal/xnoise"
+	"github.com/dklKevin/agent_forest/internal/canvas"
+	"github.com/dklKevin/agent_forest/internal/model"
+	"github.com/dklKevin/agent_forest/internal/sprite"
+	"github.com/dklKevin/agent_forest/internal/xnoise"
 )
 
 // Frame carries everything volatile about one rendered moment.

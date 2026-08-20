@@ -10,7 +10,7 @@ package sprite
 import (
 	"math"
 
-	"github.com/dklKevin/agentforest/internal/xnoise"
+	"github.com/dklKevin/agent_forest/internal/xnoise"
 )
 
 // Cabin is one town's homestead, fully described so drawing is deterministic.

@@ -13,8 +13,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/dklKevin/agentforest/internal/canvas"
-	"github.com/dklKevin/agentforest/internal/forest"
+	"github.com/dklKevin/agent_forest/internal/canvas"
+	"github.com/dklKevin/agent_forest/internal/forest"
 )
 
 // SnapshotOpts configures a single-frame render.

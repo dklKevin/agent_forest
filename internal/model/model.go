@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dklKevin/agentforest/internal/events"
-	"github.com/dklKevin/agentforest/internal/xnoise"
+	"github.com/dklKevin/agent_forest/internal/events"
+	"github.com/dklKevin/agent_forest/internal/xnoise"
 )
 
 // Species is a tree form, distinguishable by silhouette alone.
